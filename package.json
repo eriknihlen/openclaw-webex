@@ -1,0 +1,75 @@
+{
+  "name": "openclaw-webex",
+  "version": "0.2.0",
+  "description": "OpenClaw channel plugin for Cisco Webex — multi-agent dispatch, AdaptiveCards, hardened webhook lifecycle, and rich live progress reporting.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "LICENSE",
+    "README.md"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./dist/plugin.js"
+    ],
+    "channel": {
+      "id": "webex",
+      "label": "Webex",
+      "selectionLabel": "Cisco Webex",
+      "docsPath": "/channels/webex",
+      "blurb": "Cisco Webex messaging via bot webhooks.",
+      "aliases": [
+        "cisco-webex"
+      ]
+    },
+    "install": {
+      "npmSpec": "openclaw-webex",
+      "defaultChoice": "npm"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "eslint src --ext .ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "deploy": "./scripts/deploy.sh",
+    "deploy:no-restart": "./scripts/deploy.sh --no-restart",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "openclaw",
+    "webex",
+    "cisco",
+    "channel",
+    "messaging",
+    "bot",
+    "adaptivecards"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@openclaw/core": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@openclaw/core": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/node-fetch": "^2.6.9",
+    "@vitest/coverage-v8": "^4.0.18",
+    "openclaw": "^2026.1.30",
+    "typescript": "^5.3.0",
+    "vitest": "^4.0.18"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

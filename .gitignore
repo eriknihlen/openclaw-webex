@@ -1,0 +1,10 @@
+node_modules/
+coverage/
+*.bak
+*.bak-*
+.DS_Store
+.idea/
+.vscode/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
