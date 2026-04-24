@@ -45,8 +45,12 @@ OpenClaw channel plugin for Cisco Webex. Multi-agent dispatch, AdaptiveCards, ha
 
 ## Install
 
+Install directly from GitHub:
+
 ```bash
-npm install openclaw-webex
+npm install github:eriknihlen/openclaw-webex
+# or
+npm install git+https://github.com/eriknihlen/openclaw-webex.git
 ```
 
 OpenClaw discovers the plugin via the `openclaw` block in `package.json` — no manifest editing needed.
@@ -54,7 +58,7 @@ OpenClaw discovers the plugin via the `openclaw` block in `package.json` — no 
 To run from a checkout:
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/eriknihlen/openclaw-webex.git
 cd openclaw-webex
 npm install
 npm run build
