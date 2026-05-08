@@ -594,8 +594,12 @@ async function processEnvelopeAsync(opts) {
             },
             replyOptions: buildProgressReplyOptions(progress, verbosity, Boolean(account.config.progressStreamReasoning)),
         });
-        if (!replyDelivered)
-            await postErrorMessage();
+        // Don't speculatively post an apology when `deliver` saw no text payload.
+        // OpenClaw's runtime can route replies through the `message` tool, which
+        // delivers to Webex directly and bypasses this dispatcher's `deliver`
+        // callback — so `replyDelivered` stays false even on success. Real
+        // failures already surface via `onError` (above) and the catch block
+        // (below); both call postErrorMessage() explicitly.
     }
     catch (err) {
         console.error(`[webex:${account.accountId}] dispatchReply threw: ${err instanceof Error ? err.message : err}`);
@@ -1088,15 +1092,18 @@ exports.webexPlugin = {
             return normalized || undefined;
         },
         targetResolver: {
-            looksLikeId: (raw) => {
-                const trimmed = raw.trim();
-                if (!trimmed)
+            // Backport 2026-05-08: runtime now passes both the raw and normalized
+            // forms; use normalized when present so a "webex:..." prefix is stripped
+            // before pattern-matching, and fall back to raw for compatibility.
+            looksLikeId: (raw, normalized) => {
+                const check = (normalized || raw || "").trim();
+                if (!check)
                     return false;
                 // Webex IDs are base64-encoded and start with a specific prefix
-                if (trimmed.startsWith("Y2lzY29zcGFyazovL3"))
+                if (check.startsWith("Y2lzY29zcGFyazovL3"))
                     return true;
                 // Also accept emails
-                return trimmed.includes("@");
+                return check.includes("@");
             },
             hint: "<roomId|personId|email>",
         },
@@ -1104,13 +1111,23 @@ exports.webexPlugin = {
     outbound: {
         deliveryMode: "direct",
         textChunkLimit: 7000, // Webex has a 7439 byte limit
+        // Backport 2026-05-08: the OpenClaw runtime contract for sendText /
+        // sendMedia changed — `ctx` no longer includes a pre-resolved `account`
+        // object. Providers are expected to receive `{ cfg, accountId, ... }` and
+        // resolve the account themselves via resolveWebexAccount(). The previous
+        // shape (`ctx.account`) caused "Cannot read properties of undefined
+        // (reading 'config')" when the runtime called these handlers.
         sendText: async (ctx) => {
-            const { to, text, account, replyToId } = ctx;
+            const { cfg, accountId, to, text, replyToId, threadId } = ctx;
+            const account = resolveWebexAccount({ cfg, accountId: accountId ?? undefined });
+            if (!account?.configured) {
+                throw new Error(`Webex account ${accountId ?? DEFAULT_ACCOUNT_ID} is not configured`);
+            }
             const sender = new send_1.WebexSender(account.config);
             const result = await sender.send({
                 to,
                 content: { text },
-                parentId: replyToId ?? undefined,
+                parentId: replyToId ?? (threadId != null ? String(threadId) : undefined),
             });
             return {
                 channel: "webex",
@@ -1119,7 +1136,11 @@ exports.webexPlugin = {
             };
         },
         sendMedia: async (ctx) => {
-            const { to, text, mediaUrl, account, replyToId } = ctx;
+            const { cfg, accountId, to, text, mediaUrl, replyToId, threadId } = ctx;
+            const account = resolveWebexAccount({ cfg, accountId: accountId ?? undefined });
+            if (!account?.configured) {
+                throw new Error(`Webex account ${accountId ?? DEFAULT_ACCOUNT_ID} is not configured`);
+            }
             const sender = new send_1.WebexSender(account.config);
             const result = await sender.send({
                 to,
@@ -1127,7 +1148,7 @@ exports.webexPlugin = {
                     text,
                     files: mediaUrl ? [mediaUrl] : undefined,
                 },
-                parentId: replyToId ?? undefined,
+                parentId: replyToId ?? (threadId != null ? String(threadId) : undefined),
             });
             return {
                 channel: "webex",
