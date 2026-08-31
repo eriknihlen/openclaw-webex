@@ -501,7 +501,14 @@ async function processEnvelopeAsync(opts) {
     }
     const sender = new send_1.WebexSender(account.config);
     const verbosity = account.config.progressVerbosity ?? "detailed";
-    const showPlaceholder = account.config.showProgressPlaceholder !== false && verbosity !== "silent";
+    // Slash-command turns (/status, /help, …) are answered synchronously by
+    // core without an agent run — a "Working on it…" placeholder is pure
+    // noise there, so suppress progress reporting entirely for them. The
+    // bot mention has already been stripped by the event handler, so a
+    // command arrives as leading "/".
+    const isCommandTurn = (envelope.content.text ?? "").trimStart().startsWith("/");
+    const showPlaceholder = !isCommandTurn &&
+        account.config.showProgressPlaceholder !== false && verbosity !== "silent";
     const placeholderText = account.config.progressPlaceholderText ?? "Working on it…";
     const progress = showPlaceholder
         ? (0, progress_1.createProgressReporter)({
