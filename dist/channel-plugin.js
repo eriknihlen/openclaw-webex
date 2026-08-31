@@ -92,11 +92,23 @@ async function deliverModelPickerCard(opts) {
  * fails validation or the send is rejected (e.g. body too large).
  */
 async function deliverCommandReplyCard(opts) {
+    // Toggle-style commands get their on/off choices as buttons instead of
+    // the generic quick-command row.
+    const isThinkToggle = opts.command === "/think" ||
+        opts.command === "/thinking" ||
+        opts.command === "/reasoning";
+    const quickCommands = isThinkToggle
+        ? [
+            { title: "🧠 Think on", command: "/think on" },
+            { title: "💤 Think off", command: "/think off" },
+            { title: "📊 Status", command: "/status" },
+        ]
+        : QUICK_COMMANDS;
     try {
         const card = (0, card_builder_1.commandReplyCard)({
             command: opts.command,
             body: opts.replyText,
-            quickCommands: QUICK_COMMANDS,
+            quickCommands,
         });
         (0, card_builder_1.validateForWebex)(card);
         await opts.sender.send({
@@ -1301,6 +1313,10 @@ exports.webexPlugin = {
         // (reading 'config')" when the runtime called these handlers.
         sendText: async (ctx) => {
             const { cfg, accountId, to, text, replyToId, threadId } = ctx;
+            // Diagnostic: core routes some replies through this outbound path in
+            // addition to dispatcherOptions.deliver — log so duplicate-delivery
+            // reports can be traced to their source.
+            console.log(`[webex:${accountId ?? "default"}] outbound sendText to=${String(to).slice(0, 24)}… len=${typeof text === "string" ? text.length : 0}`);
             const account = resolveWebexAccount({ cfg, accountId: accountId ?? undefined });
             if (!account?.configured) {
                 throw new Error(`Webex account ${accountId ?? DEFAULT_ACCOUNT_ID} is not configured`);
