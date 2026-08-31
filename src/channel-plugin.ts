@@ -44,6 +44,29 @@ interface ProgressLine {
 }
 
 /**
+ * Run `fn` outside the gateway's inherited root-work admission context.
+ *
+ * Since OpenClaw 2026.8.1, every task runs under a "root work" admission lease
+ * tracked through an AsyncLocalStorage on a well-known global symbol. Webhook
+ * handlers are registered during gateway startup, so incoming Webex requests
+ * inherit the startup lease — which is released once boot completes. Core
+ * dispatch then rejects the message with GatewayDrainingError even though the
+ * gateway is healthy. Detaching from the stale store lets dispatch be admitted
+ * as fresh root work. On cores without the admission singleton (<= 2026.7)
+ * this is a plain passthrough.
+ */
+function runDetachedFromRootWorkAdmission<T>(fn: () => Promise<T>): Promise<T> {
+  const state = (globalThis as Record<symbol, unknown>)[
+    Symbol.for("openclaw.gatewayWorkAdmissionState")
+  ] as { currentRootWork?: { exit?: (fn: () => Promise<T>) => Promise<T>; getStore?: () => unknown } } | undefined;
+  const als = state?.currentRootWork;
+  if (als && typeof als.exit === "function" && als.getStore?.()) {
+    return als.exit(fn);
+  }
+  return fn();
+}
+
+/**
  * Truncate a string to a max length with an ellipsis. Leaves room for the
  * trailing "…" so the result never exceeds the limit.
  */
@@ -821,7 +844,7 @@ async function processEnvelopeAsync(opts: {
   };
 
   try {
-    await dispatchReply({
+    await runDetachedFromRootWorkAdmission(() => dispatchReply({
       ctx: ctxPayload,
       cfg,
       dispatcherOptions: {
@@ -853,7 +876,7 @@ async function processEnvelopeAsync(opts: {
         verbosity,
         Boolean(account.config.progressStreamReasoning)
       ),
-    });
+    }));
     // Don't speculatively post an apology when `deliver` saw no text payload.
     // OpenClaw's runtime can route replies through the `message` tool, which
     // delivers to Webex directly and bypasses this dispatcher's `deliver`
@@ -980,7 +1003,7 @@ async function processAttachmentActionAsync(opts: {
   const sender = new WebexSender(account.config);
 
   try {
-    await dispatchReply({
+    await runDetachedFromRootWorkAdmission(() => dispatchReply({
       ctx: ctxPayload,
       cfg,
       dispatcherOptions: {
@@ -1004,7 +1027,7 @@ async function processAttachmentActionAsync(opts: {
           );
         },
       },
-    });
+    }));
   } catch (err) {
     console.error(
       `[webex:${account.accountId}] card-action dispatch threw: ${err instanceof Error ? err.message : err}`

@@ -2,7 +2,9 @@
   "id": "webex",
   "name": "Webex Channel",
   "description": "Cisco Webex messaging integration for OpenClaw",
-  "channels": ["webex"],
+  "channels": [
+    "webex"
+  ],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -26,13 +28,20 @@
       },
       "dmPolicy": {
         "type": "string",
-        "enum": ["allow", "deny", "allowlisted", "pairing"],
+        "enum": [
+          "allow",
+          "deny",
+          "allowlisted",
+          "pairing"
+        ],
         "description": "Policy for handling direct messages",
         "default": "deny"
       },
       "allowFrom": {
         "type": "array",
-        "items": { "type": "string" },
+        "items": {
+          "type": "string"
+        },
         "description": "List of allowed person IDs or emails (when dmPolicy is allowlisted)"
       },
       "apiBaseUrl": {
@@ -56,11 +65,311 @@
       },
       "progressStreamReasoning": {
         "type": "boolean",
-        "description": "When true, stream the agent's reasoning text live into the Webex progress message instead of the static \"💭 Thinking…\" label. Opt-in because raw reasoning occasionally contains internal deliberation or echoed context users didn't intend to see; redaction is best-effort.",
+        "description": "When true, stream the agent's reasoning text live into the Webex progress message instead of the static \"\ud83d\udcad Thinking\u2026\" label. Opt-in because raw reasoning occasionally contains internal deliberation or echoed context users didn't intend to see; redaction is best-effort.",
         "default": false
+      },
+      "progressVerbosity": {
+        "type": "string",
+        "enum": [
+          "silent",
+          "minimal",
+          "detailed"
+        ]
+      },
+      "progressHeartbeatMs": {
+        "type": "number"
+      },
+      "showProgressPlaceholder": {
+        "type": "boolean"
+      },
+      "progressPlaceholderText": {
+        "type": "string"
+      },
+      "accounts": {
+        "type": "object",
+        "description": "Named webex bot accounts. Each entry is a separate bot with its own token/webhookUrl, optionally routed to a different agent.",
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "token": {
+              "type": "string"
+            },
+            "webhookUrl": {
+              "type": "string"
+            },
+            "webhookSecret": {
+              "type": "string"
+            },
+            "dmPolicy": {
+              "type": "string",
+              "enum": [
+                "allow",
+                "deny",
+                "allowlisted",
+                "pairing"
+              ]
+            },
+            "allowFrom": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "agent": {
+              "type": "string"
+            },
+            "apiBaseUrl": {
+              "type": "string"
+            },
+            "maxRetries": {
+              "type": "number"
+            },
+            "retryDelayMs": {
+              "type": "number"
+            },
+            "progressVerbosity": {
+              "type": "string",
+              "enum": [
+                "silent",
+                "minimal",
+                "detailed"
+              ]
+            },
+            "progressHeartbeatMs": {
+              "type": "number"
+            },
+            "progressStreamReasoning": {
+              "type": "boolean"
+            },
+            "showProgressPlaceholder": {
+              "type": "boolean"
+            },
+            "progressPlaceholderText": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "token",
+            "webhookUrl"
+          ]
+        }
       }
     },
-    "required": ["token", "webhookUrl"]
+    "anyOf": [
+      {
+        "required": [
+          "token",
+          "webhookUrl"
+        ]
+      },
+      {
+        "required": [
+          "accounts"
+        ]
+      }
+    ]
+  },
+  "channelConfigs": {
+    "webex": {
+      "label": "Webex",
+      "description": "Cisco Webex messaging integration",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "token": {
+            "type": "string"
+          },
+          "webhookUrl": {
+            "type": "string"
+          },
+          "webhookSecret": {
+            "type": "string"
+          },
+          "dmPolicy": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "deny",
+              "allowlisted",
+              "pairing"
+            ],
+            "default": "deny"
+          },
+          "allowFrom": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "agent": {
+            "type": "string"
+          },
+          "apiBaseUrl": {
+            "type": "string",
+            "default": "https://webexapis.com/v1"
+          },
+          "maxRetries": {
+            "type": "number",
+            "default": 3
+          },
+          "retryDelayMs": {
+            "type": "number",
+            "default": 1000
+          },
+          "progressVerbosity": {
+            "type": "string",
+            "enum": [
+              "silent",
+              "minimal",
+              "detailed"
+            ]
+          },
+          "progressHeartbeatMs": {
+            "type": "number"
+          },
+          "progressStreamReasoning": {
+            "type": "boolean",
+            "default": false
+          },
+          "showProgressPlaceholder": {
+            "type": "boolean"
+          },
+          "progressPlaceholderText": {
+            "type": "string"
+          },
+          "accounts": {
+            "type": "object",
+            "description": "Named webex bot accounts. Each entry is a separate bot with its own token/webhookUrl, optionally routed to a different agent.",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "token": {
+                  "type": "string"
+                },
+                "webhookUrl": {
+                  "type": "string"
+                },
+                "webhookSecret": {
+                  "type": "string"
+                },
+                "dmPolicy": {
+                  "type": "string",
+                  "enum": [
+                    "allow",
+                    "deny",
+                    "allowlisted",
+                    "pairing"
+                  ]
+                },
+                "allowFrom": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "agent": {
+                  "type": "string"
+                },
+                "apiBaseUrl": {
+                  "type": "string"
+                },
+                "maxRetries": {
+                  "type": "number"
+                },
+                "retryDelayMs": {
+                  "type": "number"
+                },
+                "progressVerbosity": {
+                  "type": "string",
+                  "enum": [
+                    "silent",
+                    "minimal",
+                    "detailed"
+                  ]
+                },
+                "progressHeartbeatMs": {
+                  "type": "number"
+                },
+                "progressStreamReasoning": {
+                  "type": "boolean"
+                },
+                "showProgressPlaceholder": {
+                  "type": "boolean"
+                },
+                "progressPlaceholderText": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "token",
+                "webhookUrl"
+              ]
+            }
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "token",
+              "webhookUrl"
+            ]
+          },
+          {
+            "required": [
+              "accounts"
+            ]
+          }
+        ]
+      },
+      "uiHints": {
+        "token": {
+          "label": "Bot Access Token",
+          "sensitive": true,
+          "placeholder": "Your Webex bot token from developer.webex.com"
+        },
+        "webhookUrl": {
+          "label": "Webhook URL",
+          "placeholder": "https://your-domain.com/webhooks/webex/default"
+        },
+        "webhookSecret": {
+          "label": "Webhook Secret",
+          "sensitive": true
+        },
+        "dmPolicy": {
+          "label": "DM Policy"
+        },
+        "allowFrom": {
+          "label": "Allowed Senders"
+        },
+        "agent": {
+          "label": "Agent ID",
+          "placeholder": "main"
+        },
+        "progressVerbosity": {
+          "label": "Progress Verbosity"
+        },
+        "progressStreamReasoning": {
+          "label": "Stream reasoning text"
+        }
+      },
+      "commands": {
+        "nativeCommandsAutoEnabled": true,
+        "nativeSkillsAutoEnabled": false
+      }
+    }
   },
   "uiHints": {
     "token": {
@@ -80,10 +389,22 @@
     "dmPolicy": {
       "label": "DM Policy",
       "options": [
-        { "value": "allow", "label": "Allow all" },
-        { "value": "deny", "label": "Deny all" },
-        { "value": "allowlisted", "label": "Allowlist only" },
-        { "value": "pairing", "label": "Pairing required" }
+        {
+          "value": "allow",
+          "label": "Allow all"
+        },
+        {
+          "value": "deny",
+          "label": "Deny all"
+        },
+        {
+          "value": "allowlisted",
+          "label": "Allowlist only"
+        },
+        {
+          "value": "pairing",
+          "label": "Pairing required"
+        }
       ]
     },
     "allowFrom": {
