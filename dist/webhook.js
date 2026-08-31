@@ -64,6 +64,18 @@ class WebexWebhookHandler {
         }
         // Fetch full message details (webhook only contains IDs)
         const message = await this.fetchMessage(payload.data.id);
+        // Group spaces: require an @mention of the bot. Webex's webhook
+        // delivery enforced this platform-side (bots only received mentioned
+        // group messages), but the Mercury websocket transport delivers ALL
+        // room activity — so without this gate the bot would answer every
+        // allowlisted message in every space it's a member of. Re-impose the
+        // platform's own etiquette: unmentioned group chatter is not for us.
+        // DMs are unaffected.
+        if (message.roomType === 'group' &&
+            this.botId &&
+            !(message.mentionedPeople ?? []).includes(this.botId)) {
+            return null;
+        }
         // Normalize to OpenClaw envelope
         return this.normalizeMessage(message);
     }
