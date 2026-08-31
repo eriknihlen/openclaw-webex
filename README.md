@@ -183,3 +183,10 @@ src/
 ## License
 
 [MIT](./LICENSE)
+
+## Acknowledgements
+
+Originally derived from the [`@jimiford/webex`](https://www.npmjs.com/package/@jimiford/webex)
+npm package by Jimi Ford (MIT). Since extensively extended and rewritten:
+Adaptive Cards, live progress reporting, attachment handling, sender
+allowlisting, and the Mercury WebSocket transport are additions of this fork.
