@@ -325,4 +325,11 @@ export interface RequestOptions {
   path: string;
   body?: unknown;
   headers?: Record<string, string>;
+  /**
+   * Per-call override of the sender's configured retry budget. Used by
+   * callers on a latency-sensitive path (e.g. a best-effort pre-dispatch
+   * check) that would rather fail fast than inherit the full retry/backoff
+   * budget meant for outbound message delivery.
+   */
+  maxRetries?: number;
 }

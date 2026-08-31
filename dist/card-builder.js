@@ -25,7 +25,10 @@ exports.statusCard = statusCard;
 exports.approvalCard = approvalCard;
 exports.commandReplyCard = commandReplyCard;
 exports.commandPickerCard = commandPickerCard;
+exports.cardAlreadyUsed = cardAlreadyUsed;
+exports.finalizeUsedCard = finalizeUsedCard;
 exports.validateForWebex = validateForWebex;
+const formatters_1 = require("./formatters");
 const SCHEMA_VERSION = "1.3";
 const LEVEL_COLOR = {
     good: "good",
@@ -291,6 +294,152 @@ function commandPickerCard(opts) {
         })),
     ];
     return card(body, actions);
+}
+/**
+ * Recursively scan an arbitrary JSON-shaped value — any object/array,
+ * any key — for a node matching `predicate`. Unlike the targeted
+ * body/items/columns walks elsewhere in this file, this doesn't assume
+ * anything about which key a node of interest lives under, so it also
+ * catches things buried in `actions`, nested Action.ShowCard `card`
+ * objects, ImageSet `images`, etc.
+ */
+function deepFind(node, predicate) {
+    if (Array.isArray(node)) {
+        return node.some((item) => deepFind(item, predicate));
+    }
+    if (node && typeof node === "object") {
+        const n = node;
+        if (predicate(n))
+            return true;
+        return Object.values(n).some((v) => deepFind(v, predicate));
+    }
+    return false;
+}
+/**
+ * True if any node anywhere in the card — any key, any depth, including
+ * inside actions/ShowCard/ImageSet — is an image. Webex cannot PUT-edit
+ * a card containing an image, so callers must skip the edit entirely
+ * rather than send a request Webex will reject.
+ */
+function containsImage(card) {
+    return deepFind(card, (n) => n.type === "Image" || n.type === "ImageSet" || "backgroundImage" in n);
+}
+/**
+ * True if the card already carries the "used" footer marker
+ * (finalizeUsedCard's appended TextBlock, id "__openclawUsedFooter") —
+ * i.e. a previous button press already deadened this card. Used by the
+ * single-use gate in channel-plugin.ts to drop a second submission on
+ * the same card.
+ */
+function cardAlreadyUsed(card) {
+    return deepFind(card, (n) => n.id === "__openclawUsedFooter");
+}
+/** Truncate with an ellipsis, leaving room for it within `max`. */
+function cap(s, max) {
+    if (s.length <= max)
+        return s;
+    return s.slice(0, Math.max(0, max - 1)) + "…";
+}
+const MAX_INPUT_VALUE_CHARS = 200;
+/**
+ * Replace every Input.* element under `nodes` with a static TextBlock
+ * showing what was submitted, leaving everything else structurally
+ * untouched (recurses through Container/ColumnSet/Column via their
+ * body/items/columns arrays). Internal routing inputs (id starting
+ * "__openclaw") are dropped without a chosen-value line — they're
+ * plumbing, not something the user chose — except
+ * "__openclawCommandArg" (the /model-style picker's ChoiceSet), whose
+ * selection is exactly what the user picked and belongs in the record.
+ */
+function replaceInputs(nodes, inputs) {
+    if (!nodes)
+        return [];
+    const out = [];
+    for (const node of nodes) {
+        if (!node || typeof node !== "object") {
+            out.push(node);
+            continue;
+        }
+        const n = node;
+        const t = typeof n.type === "string" ? n.type : undefined;
+        // ActionSet renders as tappable buttons embedded in the body —
+        // distinct from the top-level `actions` array, which finalizeUsedCard
+        // already omits. Drop it outright; any Action.ShowCard nested inside
+        // (with its own `card`) goes with it, so no interactive control
+        // survives the rewrite.
+        if (t === "ActionSet")
+            continue;
+        if (t && t.startsWith("Input.")) {
+            const id = typeof n.id === "string" ? n.id : undefined;
+            if (id && id.startsWith("__openclaw") && id !== "__openclawCommandArg") {
+                continue; // internal routing input — no chosen-value line
+            }
+            // Label/placeholder come from the bot-authored card template, not
+            // user input — left unescaped. The submitted value is user
+            // input and goes into a markdown-rendered TextBlock, so it's
+            // escaped and length-capped before interpolation.
+            const label = (typeof n.label === "string" && n.label) ||
+                (typeof n.placeholder === "string" && n.placeholder) ||
+                id ||
+                "input";
+            const raw = id ? inputs[id] : undefined;
+            const value = raw === undefined || raw === null
+                ? ""
+                : typeof raw === "string"
+                    ? raw
+                    : JSON.stringify(raw);
+            const safeValue = (0, formatters_1.escapeMarkdown)(cap(value, MAX_INPUT_VALUE_CHARS));
+            out.push({
+                type: "TextBlock",
+                text: `▸ ${label}: ${safeValue}`,
+                wrap: true,
+                isSubtle: true,
+            });
+            continue;
+        }
+        const clone = { ...n };
+        // selectAction turns a whole element (Container, ColumnSet, Column,
+        // TextBlock, Image, …) into a tap target — strip it from every node
+        // we keep so nothing in the deadened card stays clickable.
+        delete clone.selectAction;
+        for (const key of ["body", "items", "columns"]) {
+            const v = n[key];
+            if (Array.isArray(v))
+                clone[key] = replaceInputs(v, inputs);
+        }
+        out.push(clone);
+    }
+    return out;
+}
+/**
+ * Turn a card that was just acted on into its deadened "used" form:
+ * actions removed (no more double-clicks), every Input.* element
+ * replaced by a static line showing what was chosen, and a footer
+ * TextBlock recording who acted and when. Returns null when the card
+ * contains an Image anywhere — Webex's PUT /messages/{id} edit rejects
+ * cards with images, so the caller must skip the edit rather than send
+ * a request that will fail.
+ */
+function finalizeUsedCard(c, opts) {
+    if (containsImage(c))
+        return null;
+    const body = replaceInputs(c.body, opts.inputs);
+    // id marks this card as already-deadened — cardAlreadyUsed() looks
+    // for it so a second click on the same (now-stale) card gets dropped
+    // instead of firing a second dispatch.
+    body.push({
+        type: "TextBlock",
+        id: "__openclawUsedFooter",
+        text: opts.summary,
+        wrap: true,
+        weight: "bolder",
+        spacing: "medium",
+    });
+    return {
+        type: c.type,
+        version: c.version,
+        body,
+    };
 }
 /**
  * Validate that a card uses only elements Webex's validator will

@@ -116,12 +116,16 @@ class WebexSender {
         });
     }
     /**
-     * Get a message by ID
+     * Get a message by ID. `opts.maxRetries` lets a latency-sensitive caller
+     * (e.g. a best-effort pre-dispatch check) cap the retry budget below the
+     * sender's configured default, instead of inheriting the full
+     * retry/backoff chain meant for outbound message delivery.
      */
-    async getMessage(messageId) {
+    async getMessage(messageId, opts) {
         return this.request({
             method: 'GET',
             path: `/messages/${messageId}`,
+            maxRetries: opts?.maxRetries,
         });
     }
     /**
@@ -140,6 +144,41 @@ class WebexSender {
         const body = { roomId, text };
         if (markdown)
             body.markdown = markdown;
+        return this.request({
+            method: 'PUT',
+            path: `/messages/${messageId}`,
+            body,
+        });
+    }
+    /**
+     * Edit an existing message into a card-carrying state via PUT
+     * /messages/{id}. Sibling to updateMessage — that method only ever
+     * carries text/markdown; card edits need the `attachments` array too,
+     * and Webex requires `roomId` in the body either way. Used by the
+     * card-rewrite flow (channel-plugin.ts rewriteSourceCardAsUsed) to
+     * replace an interactive card with its deadened "used" form after a
+     * button click, so the original message becomes a read-only outcome
+     * record instead of staying tappable.
+     *
+     * `text` is required — Webex's PUT rejects an edit with neither text
+     * nor markdown, and every rewrite has a summary line to show. Capped
+     * at 7000 chars here as a last line of defense even though callers
+     * are expected to cap it themselves (e.g. preserving the original
+     * message's text alongside the appended summary).
+     */
+    async updateCardMessage(messageId, opts) {
+        const body = {
+            roomId: opts.roomId,
+            text: opts.text.slice(0, 7000),
+        };
+        if (opts.markdown)
+            body.markdown = opts.markdown;
+        body.attachments = [
+            {
+                contentType: 'application/vnd.microsoft.card.adaptive',
+                content: opts.card,
+            },
+        ];
         return this.request({
             method: 'PUT',
             path: `/messages/${messageId}`,
@@ -257,7 +296,8 @@ class WebexSender {
     async request(options) {
         let lastError = null;
         let attempt = 0;
-        while (attempt <= this.retryOptions.maxRetries) {
+        const maxRetries = options.maxRetries ?? this.retryOptions.maxRetries;
+        while (attempt <= maxRetries) {
             try {
                 await this.acquireSlot();
                 return await this.executeRequest(options);
@@ -265,7 +305,7 @@ class WebexSender {
             catch (error) {
                 lastError = error;
                 attempt++;
-                if (attempt > this.retryOptions.maxRetries) {
+                if (attempt > maxRetries) {
                     break;
                 }
                 if (!this.shouldRetry(error, attempt)) {

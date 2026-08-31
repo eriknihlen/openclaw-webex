@@ -1,7 +1,7 @@
 /**
  * Webex Message Sending Module
  */
-import type { WebexChannelConfig, WebexMessage, OpenClawOutboundMessage } from './types';
+import type { WebexChannelConfig, WebexMessage, OpenClawOutboundMessage, AdaptiveCard } from './types';
 export declare class WebexSender {
     private config;
     private apiBaseUrl;
@@ -46,9 +46,14 @@ export declare class WebexSender {
      */
     sendReply(roomId: string, parentId: string, text: string, markdown?: string): Promise<WebexMessage>;
     /**
-     * Get a message by ID
+     * Get a message by ID. `opts.maxRetries` lets a latency-sensitive caller
+     * (e.g. a best-effort pre-dispatch check) cap the retry budget below the
+     * sender's configured default, instead of inheriting the full
+     * retry/backoff chain meant for outbound message delivery.
      */
-    getMessage(messageId: string): Promise<WebexMessage>;
+    getMessage(messageId: string, opts?: {
+        maxRetries?: number;
+    }): Promise<WebexMessage>;
     /**
      * Edit an existing message in place via PUT /messages/{id}.
      *
@@ -62,6 +67,28 @@ export declare class WebexSender {
      * message per state change.
      */
     updateMessage(messageId: string, roomId: string, text: string, markdown?: string): Promise<WebexMessage>;
+    /**
+     * Edit an existing message into a card-carrying state via PUT
+     * /messages/{id}. Sibling to updateMessage — that method only ever
+     * carries text/markdown; card edits need the `attachments` array too,
+     * and Webex requires `roomId` in the body either way. Used by the
+     * card-rewrite flow (channel-plugin.ts rewriteSourceCardAsUsed) to
+     * replace an interactive card with its deadened "used" form after a
+     * button click, so the original message becomes a read-only outcome
+     * record instead of staying tappable.
+     *
+     * `text` is required — Webex's PUT rejects an edit with neither text
+     * nor markdown, and every rewrite has a summary line to show. Capped
+     * at 7000 chars here as a last line of defense even though callers
+     * are expected to cap it themselves (e.g. preserving the original
+     * message's text alongside the appended summary).
+     */
+    updateCardMessage(messageId: string, opts: {
+        roomId: string;
+        text: string;
+        markdown?: string;
+        card: AdaptiveCard;
+    }): Promise<WebexMessage>;
     /**
      * Delete a message by ID
      */

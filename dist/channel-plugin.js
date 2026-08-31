@@ -843,46 +843,94 @@ async function dispatchCommandFromCard(opts) {
         console.error(`[webex:${account.accountId}] card command dispatch threw: ${err instanceof Error ? err.message : err}`);
     }
 }
+/**
+ * Format a Date as "YYYY-MM-DD HH:MM" in UTC, for the card-rewrite
+ * footer line.
+ */
+function formatUtcTimestamp(d) {
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+}
+/**
+ * Extract the Adaptive Card content from a fetched message, or undefined
+ * if the first attachment isn't a genuine adaptive card. Webex's JSON
+ * response is untyped at the network boundary, so this is a runtime
+ * check, not just type narrowing — shared by the single-use gate and
+ * rewriteSourceCardAsUsed so both apply the identical guard.
+ */
+function extractCardContent(message) {
+    const attachment = message.attachments?.[0];
+    const content = attachment?.content;
+    if (!attachment ||
+        attachment.contentType !== "application/vnd.microsoft.card.adaptive" ||
+        !content ||
+        content.type !== "AdaptiveCard") {
+        return undefined;
+    }
+    return content;
+}
+/**
+ * Rewrite the card message a button click just came from into its
+ * deadened "used" form — actions gone, inputs replaced by what was
+ * chosen, a footer naming who acted and when — so the room reads as an
+ * audit log and the card can't be double-clicked. Called fire-and-forget
+ * from both processAttachmentActionAsync branches, BEFORE the command/
+ * agent dispatch, so the card deadens immediately even if the dispatch
+ * takes seconds. Every failure path only logs — a broken edit must never
+ * take down the actual command/submission handling.
+ *
+ * Takes the already-fetched source message (the caller GETs it once, up
+ * front, to also run the single-use gate — see processAttachmentActionAsync)
+ * instead of fetching it again here, and the caller's already-constructed
+ * WebexSender rather than building a second one.
+ */
+async function rewriteSourceCardAsUsed(opts) {
+    const { account, action, message, summary, sender } = opts;
+    try {
+        const content = extractCardContent(message);
+        if (!content)
+            return; // not a genuine adaptive-card message — nothing to rewrite
+        const finalized = (0, card_builder_1.finalizeUsedCard)(content, {
+            summary,
+            inputs: action.inputs,
+        });
+        if (!finalized) {
+            console.log(`[webex:${account.accountId}] skipping card rewrite for ${action.messageId}: card contains an image, Webex cannot edit it`);
+            return;
+        }
+        // Catch a malformed finalized card locally rather than let Webex's
+        // PUT surface a generic HTTP 400 — same reasoning validateForWebex
+        // exists for POST /messages elsewhere in this codebase.
+        (0, card_builder_1.validateForWebex)(finalized);
+        // Preserve the original text fallback rather than clobbering it —
+        // clients that render only `text` should still see what the card
+        // said, plus the new outcome line.
+        const fallbackText = `${message.text ?? ""}\n${summary}`.trim().slice(0, 7000);
+        await sender.updateCardMessage(action.messageId, {
+            roomId: action.roomId,
+            text: fallbackText,
+            card: finalized,
+        });
+    }
+    catch (err) {
+        console.warn(`[webex:${account.accountId}] card rewrite failed for ${action.messageId}: ${err instanceof Error ? err.message : err}`);
+    }
+}
 async function processAttachmentActionAsync(opts) {
     const { action, account, runtime } = opts;
     const cfg = runtime.config?.loadConfig?.() ?? {};
     const agentId = typeof account.config.agent === "string" && account.config.agent.length > 0
         ? account.config.agent
         : "main";
-    // Resolve submitter's display name — best-effort; same cache the
-    // message path uses, so lookups reuse cached results.
-    let displayName;
-    try {
-        const people = getPeopleCache(account.accountId, account.config.apiBaseUrl);
-        displayName = await people.getDisplayName(action.personId, account.config.token);
-    }
-    catch {
-        // ignore — downstream handles missing name gracefully
-    }
-    // Tap-to-run command buttons: a card Action.Submit carrying
-    // `__openclawCommand` executes that slash command as if the submitter
-    // had typed it. Message-path allowlisting doesn't cover card actions,
-    // so gate here: the submitter's personId or email must pass the same
-    // dmPolicy/allowFrom check as a typed message would. Unauthorized
-    // clicks are dropped silently.
-    const commandFromCard = (() => {
-        const base = typeof action.inputs.__openclawCommand === "string" &&
-            action.inputs.__openclawCommand.trimStart().startsWith("/")
-            ? action.inputs.__openclawCommand.trim()
-            : undefined;
-        if (!base)
-            return undefined;
-        // Optional argument from a picker input (e.g. the /model dropdown).
-        // Strictly validated: a single slug-shaped token, no whitespace or
-        // shell/markup characters — it is joined into a command string that
-        // runs with CommandAuthorized.
-        const rawArg = typeof action.inputs.__openclawCommandArg === "string"
-            ? action.inputs.__openclawCommandArg.trim()
-            : undefined;
-        const arg = rawArg && /^[A-Za-z0-9._/:@-]{1,120}$/.test(rawArg) ? rawArg : undefined;
-        return arg ? `${base} ${arg}` : base;
-    })();
-    if (commandFromCard) {
+    // AUTHORIZATION — gates every attachment-action submission, command
+    // buttons AND generic card submissions alike, before any fetch,
+    // dispatch, or card rewrite happens. Previously this check lived
+    // inside the commandFromCard branch only, so generic card submissions
+    // bypassed the allowlist entirely; tightened here to close that gap.
+    // Same semantics as the message path: dmPolicy "allow" authorizes
+    // everyone, "allowlisted" checks personId or any of the submitter's
+    // emails against allowFrom, anything else denies.
+    {
         let authorized = false;
         const policy = account.config.dmPolicy;
         if (policy === "allow") {
@@ -906,8 +954,83 @@ async function processAttachmentActionAsync(opts) {
             }
         }
         if (!authorized) {
-            console.warn(`[webex:${account.accountId}] dropped card command from unauthorized submitter`);
+            console.warn(`[webex:${account.accountId}] dropped card action from unauthorized submitter`);
             return;
+        }
+    }
+    // Resolve submitter's display name — best-effort; same cache the
+    // message path uses, so lookups reuse cached results.
+    let displayName;
+    try {
+        const people = getPeopleCache(account.accountId, account.config.apiBaseUrl);
+        displayName = await people.getDisplayName(action.personId, account.config.token);
+    }
+    catch {
+        // ignore — downstream handles missing name gracefully
+    }
+    const sender = new send_1.WebexSender(account.config);
+    // Single-use enforcement: fetch the source card once (reused below for
+    // the rewrite — never GET twice) and drop the submission outright if
+    // it's already carrying finalizeUsedCard's "used" marker, meaning a
+    // prior click already deadened it. Best-effort, not transactional: two
+    // clicks landing within the GET's API latency can both pass this
+    // check before either rewrite completes, so a determined double-click
+    // can still slip through. This closes the common case (a slow agent
+    // reply tempting a second tap on a still-live-looking card), not every
+    // race. This GET sits on the critical path of every card click, so it
+    // gets a minimal retry budget (1) rather than inheriting the sender's
+    // full outbound-delivery retry/backoff chain — it's a best-effort
+    // check, not a delivery that's worth blocking dispatch over.
+    let sourceMessage;
+    try {
+        sourceMessage = await sender.getMessage(action.messageId, { maxRetries: 1 });
+    }
+    catch (err) {
+        console.warn(`[webex:${account.accountId}] failed to fetch source card ${action.messageId}: ${err instanceof Error ? err.message : err}`);
+    }
+    if (sourceMessage) {
+        const sourceCard = extractCardContent(sourceMessage);
+        if (sourceCard && (0, card_builder_1.cardAlreadyUsed)(sourceCard)) {
+            console.log(`[webex:${account.accountId}] dropped card action ${action.id}: source card ${action.messageId} already marked used`);
+            return;
+        }
+    }
+    // Tap-to-run command buttons: a card Action.Submit carrying
+    // `__openclawCommand` executes that slash command as if the submitter
+    // had typed it. Authorization for this was already checked above.
+    const commandFromCard = (() => {
+        const base = typeof action.inputs.__openclawCommand === "string" &&
+            action.inputs.__openclawCommand.trimStart().startsWith("/")
+            ? action.inputs.__openclawCommand.trim()
+            : undefined;
+        if (!base)
+            return undefined;
+        // Optional argument from a picker input (e.g. the /model dropdown).
+        // Strictly validated: a single slug-shaped token, no whitespace or
+        // shell/markup characters — it is joined into a command string that
+        // runs with CommandAuthorized.
+        const rawArg = typeof action.inputs.__openclawCommandArg === "string"
+            ? action.inputs.__openclawCommandArg.trim()
+            : undefined;
+        const arg = rawArg && /^[A-Za-z0-9._/:@-]{1,120}$/.test(rawArg) ? rawArg : undefined;
+        return arg ? `${base} ${arg}` : base;
+    })();
+    if (commandFromCard) {
+        // Both interpolated values are markdown-escaped and length-capped —
+        // the command string is only loosely validated (must start with
+        // "/") and the display name comes from a Webex profile, so neither
+        // is safe to drop straight into a TextBlock unescaped.
+        const safeCommand = (0, formatters_1.escapeMarkdown)(truncate(commandFromCard, 140));
+        const safeActor = (0, formatters_1.escapeMarkdown)(truncate(displayName ?? action.personId, 80));
+        const commandSummary = `✅ ${safeCommand} — ${safeActor} · ${formatUtcTimestamp(new Date())} UTC`;
+        if (sourceMessage) {
+            void rewriteSourceCardAsUsed({
+                account,
+                action,
+                message: sourceMessage,
+                summary: commandSummary,
+                sender,
+            });
         }
         await dispatchCommandFromCard({
             account,
@@ -977,7 +1100,17 @@ async function processAttachmentActionAsync(opts) {
         console.warn(`[webex:${account.accountId}] dispatchReply not available for card action`);
         return;
     }
-    const sender = new send_1.WebexSender(account.config);
+    const safeActor = (0, formatters_1.escapeMarkdown)(truncate(displayName ?? action.personId, 80));
+    const submissionSummary = `✅ Submitted by ${safeActor} · ${formatUtcTimestamp(new Date())} UTC`;
+    if (sourceMessage) {
+        void rewriteSourceCardAsUsed({
+            account,
+            action,
+            message: sourceMessage,
+            summary: submissionSummary,
+            sender,
+        });
+    }
     try {
         await runDetachedFromRootWorkAdmission(() => dispatchReply({
             ctx: ctxPayload,

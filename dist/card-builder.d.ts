@@ -135,6 +135,27 @@ export declare function commandPickerCard(opts: {
     }>;
 }): AdaptiveCard;
 /**
+ * True if the card already carries the "used" footer marker
+ * (finalizeUsedCard's appended TextBlock, id "__openclawUsedFooter") —
+ * i.e. a previous button press already deadened this card. Used by the
+ * single-use gate in channel-plugin.ts to drop a second submission on
+ * the same card.
+ */
+export declare function cardAlreadyUsed(card: AdaptiveCard): boolean;
+/**
+ * Turn a card that was just acted on into its deadened "used" form:
+ * actions removed (no more double-clicks), every Input.* element
+ * replaced by a static line showing what was chosen, and a footer
+ * TextBlock recording who acted and when. Returns null when the card
+ * contains an Image anywhere — Webex's PUT /messages/{id} edit rejects
+ * cards with images, so the caller must skip the edit rather than send
+ * a request that will fail.
+ */
+export declare function finalizeUsedCard(c: AdaptiveCard, opts: {
+    summary: string;
+    inputs: Record<string, unknown>;
+}): AdaptiveCard | null;
+/**
  * Validate that a card uses only elements Webex's validator will
  * accept. Throws with a precise error message if a banned element or
  * property is present — catches problems locally before the Webex

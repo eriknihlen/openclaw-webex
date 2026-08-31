@@ -11,6 +11,7 @@ import type {
   WebexApiError,
   RetryOptions,
   RequestOptions,
+  AdaptiveCard,
 } from './types';
 
 const DEFAULT_API_BASE_URL = 'https://webexapis.com/v1';
@@ -143,12 +144,19 @@ export class WebexSender {
   }
 
   /**
-   * Get a message by ID
+   * Get a message by ID. `opts.maxRetries` lets a latency-sensitive caller
+   * (e.g. a best-effort pre-dispatch check) cap the retry budget below the
+   * sender's configured default, instead of inheriting the full
+   * retry/backoff chain meant for outbound message delivery.
    */
-  async getMessage(messageId: string): Promise<WebexMessage> {
+  async getMessage(
+    messageId: string,
+    opts?: { maxRetries?: number }
+  ): Promise<WebexMessage> {
     return this.request<WebexMessage>({
       method: 'GET',
       path: `/messages/${messageId}`,
+      maxRetries: opts?.maxRetries,
     });
   }
 
@@ -172,6 +180,44 @@ export class WebexSender {
   ): Promise<WebexMessage> {
     const body: Record<string, unknown> = { roomId, text };
     if (markdown) body.markdown = markdown;
+    return this.request<WebexMessage>({
+      method: 'PUT',
+      path: `/messages/${messageId}`,
+      body,
+    });
+  }
+
+  /**
+   * Edit an existing message into a card-carrying state via PUT
+   * /messages/{id}. Sibling to updateMessage — that method only ever
+   * carries text/markdown; card edits need the `attachments` array too,
+   * and Webex requires `roomId` in the body either way. Used by the
+   * card-rewrite flow (channel-plugin.ts rewriteSourceCardAsUsed) to
+   * replace an interactive card with its deadened "used" form after a
+   * button click, so the original message becomes a read-only outcome
+   * record instead of staying tappable.
+   *
+   * `text` is required — Webex's PUT rejects an edit with neither text
+   * nor markdown, and every rewrite has a summary line to show. Capped
+   * at 7000 chars here as a last line of defense even though callers
+   * are expected to cap it themselves (e.g. preserving the original
+   * message's text alongside the appended summary).
+   */
+  async updateCardMessage(
+    messageId: string,
+    opts: { roomId: string; text: string; markdown?: string; card: AdaptiveCard }
+  ): Promise<WebexMessage> {
+    const body: Record<string, unknown> = {
+      roomId: opts.roomId,
+      text: opts.text.slice(0, 7000),
+    };
+    if (opts.markdown) body.markdown = opts.markdown;
+    body.attachments = [
+      {
+        contentType: 'application/vnd.microsoft.card.adaptive',
+        content: opts.card,
+      },
+    ];
     return this.request<WebexMessage>({
       method: 'PUT',
       path: `/messages/${messageId}`,
@@ -295,8 +341,9 @@ export class WebexSender {
   private async request<T>(options: RequestOptions): Promise<T> {
     let lastError: Error | null = null;
     let attempt = 0;
+    const maxRetries = options.maxRetries ?? this.retryOptions.maxRetries;
 
-    while (attempt <= this.retryOptions.maxRetries) {
+    while (attempt <= maxRetries) {
       try {
         await this.acquireSlot();
         return await this.executeRequest<T>(options);
@@ -304,7 +351,7 @@ export class WebexSender {
         lastError = error as Error;
         attempt++;
 
-        if (attempt > this.retryOptions.maxRetries) {
+        if (attempt > maxRetries) {
           break;
         }
 
