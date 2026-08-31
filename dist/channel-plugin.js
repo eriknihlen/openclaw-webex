@@ -23,6 +23,44 @@ const QUICK_COMMANDS = [
     { title: "🆕 New session", command: "/new" },
 ];
 /**
+ * Fully interactive picker for /model: a dropdown of the models the
+ * gateway actually allows (agents.defaults.modelPolicy.allow — the
+ * authoritative list, not parsed from reply prose) plus a Switch
+ * button. Returns false when the config offers no model list, letting
+ * the caller fall back to the plain command card.
+ */
+async function deliverModelPickerCard(opts) {
+    const allow = opts.cfg?.agents?.defaults?.modelPolicy?.allow ?? [];
+    if (!Array.isArray(allow) || allow.length === 0)
+        return false;
+    const current = allow.find((m) => opts.replyText.includes(m));
+    try {
+        const card = (0, card_builder_1.commandPickerCard)({
+            command: "/model",
+            title: "/model — switch session model",
+            bodyLines: opts.replyText.split("\n").slice(0, 6),
+            choices: allow.map((m) => ({ title: m, value: m })),
+            currentValue: current,
+            submitTitle: "🔀 Switch model",
+            quickCommands: [
+                { title: "📊 Status", command: "/status" },
+                { title: "❓ Help", command: "/help" },
+            ],
+        });
+        (0, card_builder_1.validateForWebex)(card);
+        await opts.sender.send({
+            to: opts.roomId,
+            content: { text: opts.replyText, card },
+            parentId: opts.parentId,
+        });
+        return true;
+    }
+    catch (err) {
+        console.warn(`[webex:${opts.accountId}] model picker card failed, falling back: ${err instanceof Error ? err.message : err}`);
+        return false;
+    }
+}
+/**
  * Deliver a slash-command reply as an Adaptive Card with tap-to-run
  * quick-command buttons. Falls back to plain chunked text if the card
  * fails validation or the send is rejected (e.g. body too large).
@@ -605,6 +643,23 @@ async function processEnvelopeAsync(opts) {
             dispatcherOptions: {
                 deliver: async (payload) => {
                     if (payload.text) {
+                        if (isCommandTurn && commandName === "/model") {
+                            // /model gets a fully interactive picker; falls through to
+                            // the generic command card only if config has no model list.
+                            const handled = await deliverModelPickerCard({
+                                cfg,
+                                sender,
+                                roomId: envelope.conversationId,
+                                parentId: envelope.metadata.parentId,
+                                replyText: payload.text,
+                                accountId: account.accountId,
+                            });
+                            if (handled) {
+                                replyDelivered = true;
+                                await progress?.close();
+                                return;
+                            }
+                        }
                         if (isCommandTurn && commandName) {
                             // Command replies render as an Adaptive Card with
                             // quick-command buttons; falls back to text on failure.
@@ -713,19 +768,32 @@ async function dispatchCommandFromCard(opts) {
             cfg,
             dispatcherOptions: {
                 deliver: async (payload) => {
-                    if (payload.text) {
-                        await deliverCommandReplyCard({
+                    if (!payload.text)
+                        return;
+                    const baseCommand = command.split(/\s+/)[0];
+                    if (baseCommand === "/model") {
+                        const handled = await deliverModelPickerCard({
+                            cfg,
                             sender,
                             roomId,
                             parentId,
-                            command: command.split(/\s+/)[0],
                             replyText: payload.text,
-                            roomType: "group",
-                            authorId: personId,
-                            authorDisplayName: displayName,
                             accountId: account.accountId,
                         });
+                        if (handled)
+                            return;
                     }
+                    await deliverCommandReplyCard({
+                        sender,
+                        roomId,
+                        parentId,
+                        command: baseCommand,
+                        replyText: payload.text,
+                        roomType: "group",
+                        authorId: personId,
+                        authorDisplayName: displayName,
+                        accountId: account.accountId,
+                    });
                 },
                 onError: (err) => {
                     console.error(`[webex:${account.accountId}] card command dispatch error: ${err.message}`);
@@ -759,10 +827,23 @@ async function processAttachmentActionAsync(opts) {
     // so gate here: the submitter's personId or email must pass the same
     // dmPolicy/allowFrom check as a typed message would. Unauthorized
     // clicks are dropped silently.
-    const commandFromCard = typeof action.inputs.__openclawCommand === "string" &&
-        action.inputs.__openclawCommand.trimStart().startsWith("/")
-        ? action.inputs.__openclawCommand.trim()
-        : undefined;
+    const commandFromCard = (() => {
+        const base = typeof action.inputs.__openclawCommand === "string" &&
+            action.inputs.__openclawCommand.trimStart().startsWith("/")
+            ? action.inputs.__openclawCommand.trim()
+            : undefined;
+        if (!base)
+            return undefined;
+        // Optional argument from a picker input (e.g. the /model dropdown).
+        // Strictly validated: a single slug-shaped token, no whitespace or
+        // shell/markup characters — it is joined into a command string that
+        // runs with CommandAuthorized.
+        const rawArg = typeof action.inputs.__openclawCommandArg === "string"
+            ? action.inputs.__openclawCommandArg.trim()
+            : undefined;
+        const arg = rawArg && /^[A-Za-z0-9._/:@-]{1,120}$/.test(rawArg) ? rawArg : undefined;
+        return arg ? `${base} ${arg}` : base;
+    })();
     if (commandFromCard) {
         let authorized = false;
         const policy = account.config.dmPolicy;

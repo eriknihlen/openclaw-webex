@@ -309,6 +309,62 @@ export function commandReplyCard(opts: {
 }
 
 /**
+ * Interactive picker card for commands that take one argument from a
+ * known set (e.g. /model): a compact ChoiceSet plus a submit button.
+ * The submission carries `__openclawCommand` (the base command) and the
+ * selection in `__openclawCommandArg`; the channel plugin joins them and
+ * executes "<command> <arg>" as an authorized command turn.
+ */
+export function commandPickerCard(opts: {
+  command: string;
+  title: string;
+  bodyLines?: string[];
+  choices: Array<{ title: string; value: string }>;
+  currentValue?: string;
+  submitTitle: string;
+  quickCommands?: Array<{ title: string; command: string }>;
+}): AdaptiveCard {
+  const body: unknown[] = [
+    {
+      type: "TextBlock",
+      text: opts.title,
+      weight: "bolder",
+      size: "medium",
+      wrap: true,
+    },
+    ...(opts.bodyLines ?? []).map((line) => ({
+      type: "TextBlock",
+      text: line.length > 0 ? line : " ",
+      wrap: true,
+      spacing: "none",
+      isSubtle: true,
+    })),
+    {
+      type: "Input.ChoiceSet",
+      id: "__openclawCommandArg",
+      style: "compact",
+      isRequired: true,
+      errorMessage: "Pick one",
+      value: opts.currentValue,
+      choices: opts.choices.slice(0, 100),
+    },
+  ];
+  const actions: unknown[] = [
+    {
+      type: "Action.Submit",
+      title: opts.submitTitle,
+      data: { __openclawCommand: opts.command },
+    },
+    ...(opts.quickCommands ?? []).slice(0, 5).map((q) => ({
+      type: "Action.Submit",
+      title: q.title,
+      data: { __openclawCommand: q.command },
+    })),
+  ];
+  return card(body, actions);
+}
+
+/**
  * Validate that a card uses only elements Webex's validator will
  * accept. Throws with a precise error message if a banned element or
  * property is present — catches problems locally before the Webex

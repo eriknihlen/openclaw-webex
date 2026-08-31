@@ -24,6 +24,7 @@ exports.factCard = factCard;
 exports.statusCard = statusCard;
 exports.approvalCard = approvalCard;
 exports.commandReplyCard = commandReplyCard;
+exports.commandPickerCard = commandPickerCard;
 exports.validateForWebex = validateForWebex;
 const SCHEMA_VERSION = "1.3";
 const LEVEL_COLOR = {
@@ -243,6 +244,53 @@ function commandReplyCard(opts) {
         data: { __openclawCommand: q.command },
     }));
     return card(body, actions.length > 0 ? actions : undefined);
+}
+/**
+ * Interactive picker card for commands that take one argument from a
+ * known set (e.g. /model): a compact ChoiceSet plus a submit button.
+ * The submission carries `__openclawCommand` (the base command) and the
+ * selection in `__openclawCommandArg`; the channel plugin joins them and
+ * executes "<command> <arg>" as an authorized command turn.
+ */
+function commandPickerCard(opts) {
+    const body = [
+        {
+            type: "TextBlock",
+            text: opts.title,
+            weight: "bolder",
+            size: "medium",
+            wrap: true,
+        },
+        ...(opts.bodyLines ?? []).map((line) => ({
+            type: "TextBlock",
+            text: line.length > 0 ? line : " ",
+            wrap: true,
+            spacing: "none",
+            isSubtle: true,
+        })),
+        {
+            type: "Input.ChoiceSet",
+            id: "__openclawCommandArg",
+            style: "compact",
+            isRequired: true,
+            errorMessage: "Pick one",
+            value: opts.currentValue,
+            choices: opts.choices.slice(0, 100),
+        },
+    ];
+    const actions = [
+        {
+            type: "Action.Submit",
+            title: opts.submitTitle,
+            data: { __openclawCommand: opts.command },
+        },
+        ...(opts.quickCommands ?? []).slice(0, 5).map((q) => ({
+            type: "Action.Submit",
+            title: q.title,
+            data: { __openclawCommand: q.command },
+        })),
+    ];
+    return card(body, actions);
 }
 /**
  * Validate that a card uses only elements Webex's validator will

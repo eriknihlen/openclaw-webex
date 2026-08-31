@@ -113,6 +113,28 @@ export declare function commandReplyCard(opts: {
     }>;
 }): AdaptiveCard;
 /**
+ * Interactive picker card for commands that take one argument from a
+ * known set (e.g. /model): a compact ChoiceSet plus a submit button.
+ * The submission carries `__openclawCommand` (the base command) and the
+ * selection in `__openclawCommandArg`; the channel plugin joins them and
+ * executes "<command> <arg>" as an authorized command turn.
+ */
+export declare function commandPickerCard(opts: {
+    command: string;
+    title: string;
+    bodyLines?: string[];
+    choices: Array<{
+        title: string;
+        value: string;
+    }>;
+    currentValue?: string;
+    submitTitle: string;
+    quickCommands?: Array<{
+        title: string;
+        command: string;
+    }>;
+}): AdaptiveCard;
+/**
  * Validate that a card uses only elements Webex's validator will
  * accept. Throws with a precise error message if a banned element or
  * property is present — catches problems locally before the Webex
