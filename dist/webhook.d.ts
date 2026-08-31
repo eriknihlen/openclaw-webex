@@ -25,6 +25,22 @@ export declare class WebexWebhookHandler {
      */
     handleWebhook(payload: WebexWebhookPayload): Promise<OpenClawEnvelope | null>;
     /**
+     * Strip the bot's own leading @mention from the message text.
+     *
+     * Webex renders a mention as the person's display label inside `text`
+     * ("Marcus /help"), so forwarding the raw text makes every group turn
+     * start with the bot's name — and worse, splits mention-prefixed
+     * commands: core extracts "/help" but then dispatches the leftover
+     * "Marcus" as a real prompt, producing a command reply AND a chat
+     * reply. The rendered label is not guessable from the display name
+     * (clients may render a short form), so we take it from the message
+     * `html`, where the mention is an explicit <spark-mention> tag whose
+     * data-object-id identifies the target. Only a LEADING mention of the
+     * bot itself is stripped; mentions of other people, or mid-sentence
+     * mentions of the bot, pass through untouched.
+     */
+    private stripLeadingBotMention;
+    /**
      * Check if the sender is allowed based on DM policy
      */
     private isAllowedSender;

@@ -94,7 +94,64 @@ export class WebexWebhookHandler {
     }
 
     // Normalize to OpenClaw envelope
-    return this.normalizeMessage(message);
+    return this.normalizeMessage(this.stripLeadingBotMention(message));
+  }
+
+  /**
+   * Strip the bot's own leading @mention from the message text.
+   *
+   * Webex renders a mention as the person's display label inside `text`
+   * ("Marcus /help"), so forwarding the raw text makes every group turn
+   * start with the bot's name — and worse, splits mention-prefixed
+   * commands: core extracts "/help" but then dispatches the leftover
+   * "Marcus" as a real prompt, producing a command reply AND a chat
+   * reply. The rendered label is not guessable from the display name
+   * (clients may render a short form), so we take it from the message
+   * `html`, where the mention is an explicit <spark-mention> tag whose
+   * data-object-id identifies the target. Only a LEADING mention of the
+   * bot itself is stripped; mentions of other people, or mid-sentence
+   * mentions of the bot, pass through untouched.
+   */
+  private stripLeadingBotMention(message: WebexMessage): WebexMessage {
+    if (!message.html || !this.botId) return message;
+    const botUuid = (() => {
+      try {
+        const decoded = Buffer.from(this.botId, 'base64').toString('utf-8');
+        return decoded.split('/').pop() ?? '';
+      } catch {
+        return '';
+      }
+    })();
+    if (!botUuid) return message;
+
+    const mentionRe =
+      /<spark-mention\b[^>]*data-object-id="([^"]+)"[^>]*>([^<]*)<\/spark-mention>/g;
+    const labels: string[] = [];
+    for (const m of message.html.matchAll(mentionRe)) {
+      const [, objectId, label] = m;
+      if ((objectId === botUuid || objectId === this.botId) && label) {
+        labels.push(label);
+      }
+    }
+    if (labels.length === 0) return message;
+
+    const stripLeading = (value: string | undefined): string | undefined => {
+      if (!value) return value;
+      let out = value.trimStart();
+      for (const label of labels) {
+        if (out.startsWith(label)) {
+          out = out.slice(label.length).trimStart();
+          break;
+        }
+      }
+      return out;
+    };
+
+    return {
+      ...message,
+      text: stripLeading(message.text),
+      markdown: stripLeading(message.markdown),
+    };
   }
 
   /**
