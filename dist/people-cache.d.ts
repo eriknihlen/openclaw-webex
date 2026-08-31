@@ -29,6 +29,8 @@ export interface PeopleCacheOptions {
 }
 export interface PeopleCache {
     getDisplayName(personId: string, token: string): Promise<string | undefined>;
+    /** Email addresses for a person — used for allowlist checks on card actions. */
+    getEmails(personId: string, token: string): Promise<string[] | undefined>;
     /** Clear all cached entries. Exposed for tests / `/reload`. */
     clear(): void;
 }

@@ -38,6 +38,8 @@ export interface PeopleCacheOptions {
 
 export interface PeopleCache {
   getDisplayName(personId: string, token: string): Promise<string | undefined>;
+  /** Email addresses for a person — used for allowlist checks on card actions. */
+  getEmails(personId: string, token: string): Promise<string[] | undefined>;
   /** Clear all cached entries. Exposed for tests / `/reload`. */
   clear(): void;
 }
@@ -137,6 +139,29 @@ export function createPeopleCache(opts: PeopleCacheOptions = {}): PeopleCache {
           evictIfFull();
         }
         return details?.displayName;
+      } finally {
+        inflight.delete(personId);
+      }
+    },
+
+    async getEmails(personId, token) {
+      if (!personId) return undefined;
+
+      const hit = getFromCache(personId);
+      if (hit) return hit.emails;
+
+      const existing = inflight.get(personId);
+      if (existing) return (await existing)?.emails;
+
+      const promise = fetchFromApi(personId, token);
+      inflight.set(personId, promise);
+      try {
+        const details = await promise;
+        if (details) {
+          cache.set(personId, { details, insertedAt: Date.now() });
+          evictIfFull();
+        }
+        return details?.emails;
       } finally {
         inflight.delete(personId);
       }

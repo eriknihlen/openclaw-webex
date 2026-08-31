@@ -30,6 +30,61 @@ import {
 } from "./formatters";
 import type { WebexChannelConfig, WebexWebhookPayload } from "./types";
 import { WebexMercuryTransport } from "./websocket";
+import { commandReplyCard, validateForWebex } from "./card-builder";
+
+/** Quick-command buttons appended to every command reply card. */
+const QUICK_COMMANDS = [
+  { title: "📊 Status", command: "/status" },
+  { title: "❓ Help", command: "/help" },
+  { title: "🗜 Compact", command: "/compact" },
+  { title: "🆕 New session", command: "/new" },
+];
+
+/**
+ * Deliver a slash-command reply as an Adaptive Card with tap-to-run
+ * quick-command buttons. Falls back to plain chunked text if the card
+ * fails validation or the send is rejected (e.g. body too large).
+ */
+async function deliverCommandReplyCard(opts: {
+  sender: WebexSender;
+  roomId: string;
+  parentId?: string;
+  command: string;
+  replyText: string;
+  roomType: "direct" | "group";
+  authorId?: string;
+  authorDisplayName?: string;
+  accountId: string;
+}): Promise<void> {
+  try {
+    const card = commandReplyCard({
+      command: opts.command,
+      body: opts.replyText,
+      quickCommands: QUICK_COMMANDS,
+    });
+    validateForWebex(card);
+    await opts.sender.send({
+      to: opts.roomId,
+      content: { text: opts.replyText, card },
+      parentId: opts.parentId,
+    });
+    return;
+  } catch (err) {
+    console.warn(
+      `[webex:${opts.accountId}] command card delivery failed, falling back to text: ${err instanceof Error ? err.message : err}`
+    );
+  }
+  await deliverChunked({
+    sender: opts.sender,
+    roomId: opts.roomId,
+    parentId: opts.parentId,
+    replyText: opts.replyText,
+    roomType: opts.roomType,
+    authorId: opts.authorId,
+    authorDisplayName: opts.authorDisplayName,
+    accountId: opts.accountId,
+  });
+}
 
 /**
  * Formatted text pair: Webex accepts `text` (plain fallback) and
@@ -733,6 +788,9 @@ async function processEnvelopeAsync(opts: {
   // bot mention has already been stripped by the event handler, so a
   // command arrives as leading "/".
   const isCommandTurn = (envelope.content.text ?? "").trimStart().startsWith("/");
+  const commandName = isCommandTurn
+    ? (envelope.content.text ?? "").trimStart().split(/\s+/)[0]
+    : undefined;
   const showPlaceholder =
     !isCommandTurn &&
     account.config.showProgressPlaceholder !== false && verbosity !== "silent";
@@ -799,16 +857,32 @@ async function processEnvelopeAsync(opts: {
       dispatcherOptions: {
         deliver: async (payload: { text?: string; media?: string }) => {
           if (payload.text) {
-            await deliverChunked({
-              sender,
-              roomId: envelope.conversationId,
-              parentId: envelope.metadata.parentId,
-              replyText: payload.text,
-              roomType: envelope.metadata.roomType,
-              authorId: envelope.author.id,
-              authorDisplayName: envelope.author.displayName,
-              accountId: account.accountId,
-            });
+            if (isCommandTurn && commandName) {
+              // Command replies render as an Adaptive Card with
+              // quick-command buttons; falls back to text on failure.
+              await deliverCommandReplyCard({
+                sender,
+                roomId: envelope.conversationId,
+                parentId: envelope.metadata.parentId,
+                command: commandName,
+                replyText: payload.text,
+                roomType: envelope.metadata.roomType,
+                authorId: envelope.author.id,
+                authorDisplayName: envelope.author.displayName,
+                accountId: account.accountId,
+              });
+            } else {
+              await deliverChunked({
+                sender,
+                roomId: envelope.conversationId,
+                parentId: envelope.metadata.parentId,
+                replyText: payload.text,
+                roomType: envelope.metadata.roomType,
+                authorId: envelope.author.id,
+                authorDisplayName: envelope.author.displayName,
+                accountId: account.accountId,
+              });
+            }
             replyDelivered = true;
           }
           await progress?.close();
@@ -859,6 +933,82 @@ async function processEnvelopeAsync(opts: {
  *   - Otherwise, build a room-local SessionKey the same way the inbound
  *     message path does.
  */
+/**
+ * Execute a slash command triggered by a card button, replying with a
+ * fresh command card. Mirrors the message-path command dispatch: the
+ * submitter has already passed the allowlist gate, so the context is
+ * marked CommandAuthorized.
+ */
+async function dispatchCommandFromCard(opts: {
+  account: any;
+  runtime: any;
+  cfg: any;
+  command: string;
+  roomId: string;
+  parentId?: string;
+  personId: string;
+  displayName?: string;
+  agentId: string;
+}): Promise<void> {
+  const { account, runtime, cfg, command, roomId, parentId, personId, displayName, agentId } = opts;
+  const dispatchReply =
+    runtime.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher;
+  if (!dispatchReply) return;
+
+  const sender = new WebexSender(account.config);
+  const ctxPayload: Record<string, unknown> = {
+    Body: command,
+    RawBody: command,
+    CommandBody: command,
+    From: `webex:${personId}`,
+    To: `webex:${roomId}`,
+    SessionKey: `agent:${agentId}:webex:${roomId}`,
+    AccountId: account.accountId,
+    ChatType: "group",
+    SenderName: displayName ?? personId,
+    SenderId: personId,
+    Provider: "webex",
+    Surface: "webex",
+    OriginatingChannel: "webex",
+    OriginatingTo: `webex:${roomId}`,
+    MessageThreadId: parentId,
+    CommandAuthorized: true,
+  };
+
+  try {
+    await runDetachedFromRootWorkAdmission(() => dispatchReply({
+      ctx: ctxPayload,
+      cfg,
+      dispatcherOptions: {
+        deliver: async (payload: { text?: string; media?: string }) => {
+          if (payload.text) {
+            await deliverCommandReplyCard({
+              sender,
+              roomId,
+              parentId,
+              command: command.split(/\s+/)[0],
+              replyText: payload.text,
+              roomType: "group",
+              authorId: personId,
+              authorDisplayName: displayName,
+              accountId: account.accountId,
+            });
+          }
+        },
+        onError: (err: Error) => {
+          console.error(
+            `[webex:${account.accountId}] card command dispatch error: ${err.message}`
+          );
+        },
+      },
+    }));
+  } catch (err) {
+    console.error(
+      `[webex:${account.accountId}] card command dispatch threw: ${err instanceof Error ? err.message : err}`
+    );
+  }
+}
+
 async function processAttachmentActionAsync(opts: {
   action: AttachmentActionEvent;
   account: any;
@@ -883,6 +1033,61 @@ async function processAttachmentActionAsync(opts: {
     );
   } catch {
     // ignore — downstream handles missing name gracefully
+  }
+
+  // Tap-to-run command buttons: a card Action.Submit carrying
+  // `__openclawCommand` executes that slash command as if the submitter
+  // had typed it. Message-path allowlisting doesn't cover card actions,
+  // so gate here: the submitter's personId or email must pass the same
+  // dmPolicy/allowFrom check as a typed message would. Unauthorized
+  // clicks are dropped silently.
+  const commandFromCard =
+    typeof action.inputs.__openclawCommand === "string" &&
+    action.inputs.__openclawCommand.trimStart().startsWith("/")
+      ? action.inputs.__openclawCommand.trim()
+      : undefined;
+  if (commandFromCard) {
+    let authorized = false;
+    const policy = account.config.dmPolicy;
+    if (policy === "allow") {
+      authorized = true;
+    } else if (policy === "allowlisted") {
+      const allowFrom: string[] = account.config.allowFrom ?? [];
+      if (allowFrom.includes(action.personId)) {
+        authorized = true;
+      } else {
+        try {
+          const people = getPeopleCache(
+            account.accountId,
+            account.config.apiBaseUrl
+          );
+          const emails =
+            (await people.getEmails(action.personId, account.config.token)) ??
+            [];
+          authorized = emails.some((e) => allowFrom.includes(e));
+        } catch {
+          authorized = false;
+        }
+      }
+    }
+    if (!authorized) {
+      console.warn(
+        `[webex:${account.accountId}] dropped card command from unauthorized submitter`
+      );
+      return;
+    }
+    await dispatchCommandFromCard({
+      account,
+      runtime,
+      cfg,
+      command: commandFromCard,
+      roomId: action.roomId,
+      parentId: action.messageId,
+      personId: action.personId,
+      displayName,
+      agentId,
+    });
+    return;
   }
 
   // Flatten the submission into a human- and LLM-friendly text block.

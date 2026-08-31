@@ -107,6 +107,29 @@ function createPeopleCache(opts = {}) {
                 inflight.delete(personId);
             }
         },
+        async getEmails(personId, token) {
+            if (!personId)
+                return undefined;
+            const hit = getFromCache(personId);
+            if (hit)
+                return hit.emails;
+            const existing = inflight.get(personId);
+            if (existing)
+                return (await existing)?.emails;
+            const promise = fetchFromApi(personId, token);
+            inflight.set(personId, promise);
+            try {
+                const details = await promise;
+                if (details) {
+                    cache.set(personId, { details, insertedAt: Date.now() });
+                    evictIfFull();
+                }
+                return details?.emails;
+            }
+            finally {
+                inflight.delete(personId);
+            }
+        },
         clear() {
             cache.clear();
             inflight.clear();

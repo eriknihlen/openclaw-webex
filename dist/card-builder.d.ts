@@ -97,6 +97,22 @@ export declare function approvalCard(opts: {
     data: Record<string, unknown>;
 }): AdaptiveCard;
 /**
+ * Render a slash-command reply (/status, /help, …) as a card: bold
+ * command title, the reply body line-by-line (Adaptive Cards collapse
+ * plain newlines, so each line becomes its own TextBlock), and optional
+ * tap-to-run quick-command buttons whose Action.Submit carries the
+ * command in `__openclawCommand` — the channel plugin executes it as if
+ * the user had typed it.
+ */
+export declare function commandReplyCard(opts: {
+    command: string;
+    body: string;
+    quickCommands?: Array<{
+        title: string;
+        command: string;
+    }>;
+}): AdaptiveCard;
+/**
  * Validate that a card uses only elements Webex's validator will
  * accept. Throws with a precise error message if a banned element or
  * property is present — catches problems locally before the Webex
