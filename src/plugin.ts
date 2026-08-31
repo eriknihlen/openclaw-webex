@@ -3,10 +3,16 @@
  *
  * Main entry point for the OpenClaw plugin system.
  * Exports a default function that registers the Webex channel.
+ *
+ * Inbound events arrive exclusively over the Mercury websocket transport
+ * (see websocket.ts) — an outbound wss:// connection to Webex. The plugin
+ * registers no HTTP routes: there is no inbound endpoint, no public URL,
+ * and no webhook signature to verify. (Webhook transport was removed
+ * 2026-08-31 after the websocket transport was verified in production.)
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk" with { "resolution-mode": "import" };
-import { webexPlugin, createWebhookHandler, setPluginRuntime } from "./channel-plugin";
+import { webexPlugin, setPluginRuntime } from "./channel-plugin";
 
 /**
  * OpenClaw plugin registration function.
@@ -15,28 +21,8 @@ import { webexPlugin, createWebhookHandler, setPluginRuntime } from "./channel-p
  * It registers the Webex channel with the plugin system.
  */
 export default function register(api: OpenClawPluginApi): void {
-  // Store the plugin runtime for use in HTTP handlers
   setPluginRuntime(api.runtime);
-
   api.registerChannel({ plugin: webexPlugin });
-
-  // OpenClaw removed registerHttpHandler in favor of registerHttpRoute.
-  // We own the /webhooks/webex/* prefix and verify auth ourselves via the
-  // Webex webhook signature, so auth is "plugin". Cast is required because
-  // the locally pinned openclaw type defs predate registerHttpRoute.
-  (api as unknown as {
-    registerHttpRoute: (params: {
-      path: string;
-      match?: "exact" | "prefix";
-      auth: "gateway" | "plugin";
-      handler: ReturnType<typeof createWebhookHandler>;
-    }) => void;
-  }).registerHttpRoute({
-    path: "/webhooks/webex/",
-    match: "prefix",
-    auth: "plugin",
-    handler: createWebhookHandler(),
-  });
 }
 
 // Export the plugin ID for reference

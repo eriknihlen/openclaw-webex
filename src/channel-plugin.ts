@@ -4,8 +4,6 @@
  * Implements the ChannelPlugin interface for OpenClaw's plugin system.
  */
 
-import type { IncomingMessage, ServerResponse } from "node:http";
-
 import type {
   ChannelPlugin,
   OpenClawConfig,
@@ -16,7 +14,6 @@ import type {
 import { WebexSender } from "./send";
 import {
   WebexWebhookHandler,
-  WebhookValidationError,
   type AttachmentActionEvent,
 } from "./webhook";
 import { downloadWebexAttachment, type DownloadedAttachment } from "./download";
@@ -32,6 +29,7 @@ import {
   trimToSafeMarkdownBoundary,
 } from "./formatters";
 import type { WebexChannelConfig, WebexWebhookPayload } from "./types";
+import { WebexMercuryTransport } from "./websocket";
 
 /**
  * Formatted text pair: Webex accepts `text` (plain fallback) and
@@ -451,7 +449,6 @@ export interface ResolvedWebexAccount {
   configured: boolean;
   config: WebexChannelConfig;
   token?: string;
-  webhookUrl?: string;
 }
 
 /** Core config type for accessing channels.webex */
@@ -468,8 +465,6 @@ interface WebexChannelSection {
   enabled?: boolean;
   name?: string;
   token?: string;
-  webhookUrl?: string;
-  webhookSecret?: string;
   dmPolicy?: "allow" | "deny" | "allowlisted" | "pairing";
   allowFrom?: string[];
   apiBaseUrl?: string;
@@ -498,8 +493,6 @@ interface WebexAccountConfig {
   enabled?: boolean;
   name?: string;
   token?: string;
-  webhookUrl?: string;
-  webhookSecret?: string;
   dmPolicy?: "allow" | "deny" | "allowlisted" | "pairing";
   allowFrom?: string[];
   apiBaseUrl?: string;
@@ -522,64 +515,6 @@ interface WebexAccountConfig {
 }
 
 const DEFAULT_ACCOUNT_ID = "default";
-
-/** Webhook target registration for HTTP handler */
-type WebexWebhookTarget = {
-  account: ResolvedWebexAccount;
-  config: WebexChannelConfig;
-  webhookHandler: WebexWebhookHandler;
-};
-
-const webhookTargets = new Map<string, WebexWebhookTarget>();
-
-function normalizeWebhookPath(raw: string): string {
-  const trimmed = raw.trim();
-  if (!trimmed) return "/";
-  const withSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  if (withSlash.length > 1 && withSlash.endsWith("/")) {
-    return withSlash.slice(0, -1);
-  }
-  return withSlash;
-}
-
-export function registerWebexWebhookTarget(
-  path: string,
-  target: WebexWebhookTarget
-): () => void {
-  const key = normalizeWebhookPath(path);
-  webhookTargets.set(key, target);
-  return () => {
-    webhookTargets.delete(key);
-  };
-}
-
-async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<{ ok: boolean; value?: unknown; error?: string }> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  return await new Promise((resolve) => {
-    req.on("data", (chunk: Buffer) => {
-      total += chunk.length;
-      if (total > maxBytes) {
-        resolve({ ok: false, error: "payload too large" });
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => {
-      try {
-        const body = Buffer.concat(chunks).toString("utf-8");
-        const parsed = JSON.parse(body);
-        resolve({ ok: true, value: parsed });
-      } catch {
-        resolve({ ok: false, error: "invalid json" });
-      }
-    });
-    req.on("error", (err) => {
-      resolve({ ok: false, error: err.message });
-    });
-  });
-}
 
 /**
  * Attachment handle — returned by the download step so the caller can
@@ -1060,145 +995,42 @@ function cleanupTempFiles(
  * Create the webhook handler with access to the plugin runtime.
  * Returns a handler function that can process incoming Webex webhook requests.
  */
-export function createWebhookHandler(): (req: IncomingMessage, res: ServerResponse) => Promise<boolean> {
-  return async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
-    const url = new URL(req.url ?? "/", "http://localhost");
-    const path = normalizeWebhookPath(url.pathname);
+/**
+ * Dispatch a transport-synthesized (Mercury websocket) payload through
+ * the exact pipeline the HTTP webhook endpoint uses: allowlist + bot
+ * self-filter + message fetch in the handler, then the same async
+ * dispatch into the agent. Signature verification is skipped — there is
+ * no HTTP request to sign; the handler is constructed without a secret
+ * in websocket mode.
+ */
+async function dispatchTransportPayload(opts: {
+  payload: WebexWebhookPayload;
+  account: any;
+  webhookHandler: WebexWebhookHandler;
+}): Promise<void> {
+  const { payload, account, webhookHandler } = opts;
+  if (!pluginRuntime) return;
 
-    // Health probe — useful for ngrok/monitoring integrations.
-    //Lists currently registered accounts so you
-    // can see at a glance whether the plugin is wired up.
-    if (path === "/webhooks/webex/healthz" && req.method === "GET") {
-      const accounts = Array.from(webhookTargets.entries()).map(
-        ([webhookPath, t]) => ({
-          accountId: t.account.accountId,
-          agent: (t.account.config as any).agent ?? "main",
-          webhookPath,
-          configured: t.account.configured,
-          enabled: t.account.enabled,
-        })
-      );
-      res.statusCode = 200;
-      res.setHeader("Content-Type", "application/json");
-      res.end(
-        JSON.stringify({
-          status: "ok",
-          channel: "webex",
-          accountCount: accounts.length,
-          accounts,
-        })
-      );
-      return true;
+  if (payload.resource === "attachmentActions") {
+    const action = await webhookHandler.handleAttachmentAction(payload);
+    if (action) {
+      await processAttachmentActionAsync({
+        action,
+        account,
+        runtime: pluginRuntime as any,
+      });
     }
+    return;
+  }
 
-    // Check if path matches /webhooks/webex/*
-    if (!path.startsWith("/webhooks/webex/")) {
-      return false;
-    }
-
-    const target = webhookTargets.get(path);
-    if (!target) {
-      return false;
-    }
-
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.setHeader("Allow", "POST");
-      res.end("Method Not Allowed");
-      return true;
-    }
-
-    const body = await readJsonBody(req, 1024 * 1024);
-    if (!body.ok) {
-      res.statusCode = body.error === "payload too large" ? 413 : 400;
-      res.end(body.error ?? "invalid payload");
-      return true;
-    }
-
-    const { account, webhookHandler } = target;
-
-    try {
-      const signature = req.headers["x-spark-signature"] as string | undefined;
-      const payload = body.value as WebexWebhookPayload;
-
-      // Route by resource type: messages → inbound chat flow;
-      // attachmentActions → card-button submissions (tier-3). Both
-      // arrive at the same URL; Webex registers them as separate
-      // webhooks but we disambiguate here.
-      if (payload.resource === "attachmentActions") {
-        const action = await webhookHandler.handleAttachmentAction(
-          payload,
-          signature
-        );
-
-        res.statusCode = 200;
-        res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify({ ok: true }));
-
-        if (action && pluginRuntime) {
-          void processAttachmentActionAsync({
-            action,
-            account,
-            runtime: pluginRuntime as any,
-          }).catch((err) => {
-            console.error(
-              `[webex:${account.accountId}] background card-action dispatch failed: ${err instanceof Error ? err.message : err}`
-            );
-          });
-        }
-
-        return true;
-      }
-
-      // Validate signature + normalise message envelope. This is the only
-      // work that must happen before we ACK — if it throws, we want to
-      // reject with 401/500 so Webex's observability reflects the truth.
-      const envelope = await webhookHandler.handleWebhook(payload, signature);
-
-      // ACK Webex immediately.upstream awaited the
-      // full agent dispatch before returning 200, which meant any reply
-      // taking >10s caused Webex to retry and we'd double-dispatch. All
-      // downstream work now runs detached; errors surface as progress
-      // messages in the chat, not as HTTP status codes back to Webex.
-      res.statusCode = 200;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ ok: true }));
-
-      if (envelope && pluginRuntime) {
-        // Intentionally NOT awaited — runs after we've ACKed Webex.
-        void processEnvelopeAsync({
-          envelope,
-          account,
-          runtime: pluginRuntime as any,
-        }).catch((err) => {
-          console.error(
-            `[webex:${account.accountId}] background dispatch failed: ${err instanceof Error ? err.message : err}`
-          );
-        });
-      }
-
-      return true;
-    } catch (err) {
-      // Signature / header validation failures get 401; everything else
-      // is an unexpected internal error and gets 500.
-      if (err instanceof WebhookValidationError) {
-        console.warn(
-          `[webex:${account.accountId}] webhook rejected: ${err.message}`
-        );
-        res.statusCode = 401;
-        res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify({ error: err.message }));
-        return true;
-      }
-      console.error(
-        `[webex:${account.accountId}] webhook error: ${err instanceof Error ? err.message : err}`
-      );
-      res.statusCode = 500;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: "Internal error" }));
-      return true;
-    }
-  };
+  const envelope = await webhookHandler.handleWebhook(payload);
+  if (envelope) {
+    await processEnvelopeAsync({
+      envelope,
+      account,
+      runtime: pluginRuntime as any,
+    });
+  }
 }
 
 function listWebexAccountIds(cfg: CoreConfig): string[] {
@@ -1245,19 +1077,16 @@ function resolveWebexAccount(opts: {
 
   if (namedAccount) {
     const token = namedAccount.token ?? section.token;
-    const webhookUrl = namedAccount.webhookUrl ?? section.webhookUrl;
 
     return {
       accountId,
       name: namedAccount.name,
+      // websocket transport: a token is all that's needed
+      configured: Boolean(token),
       enabled: namedAccount.enabled !== false,
-      configured: Boolean(token && webhookUrl),
       token,
-      webhookUrl,
       config: {
         token: token ?? "",
-        webhookUrl: webhookUrl ?? "",
-        webhookSecret: namedAccount.webhookSecret ?? section.webhookSecret,
         //default-deny. Upstream defaulted to
         // "allow", making the bot open to anyone by omission.
         dmPolicy: namedAccount.dmPolicy ?? section.dmPolicy ?? "deny",
@@ -1290,13 +1119,11 @@ function resolveWebexAccount(opts: {
       accountId,
       name: section.name,
       enabled: section.enabled !== false,
-      configured: Boolean(section.token && section.webhookUrl),
+      // websocket transport: a token is all that's needed
+      configured: Boolean(section.token),
       token: section.token,
-      webhookUrl: section.webhookUrl,
       config: {
         token: section.token ?? "",
-        webhookUrl: section.webhookUrl ?? "",
-        webhookSecret: section.webhookSecret,
         //default-deny (see setAccountEnabled note above).
         dmPolicy: section.dmPolicy ?? "deny",
         allowFrom: section.allowFrom,
@@ -1394,7 +1221,7 @@ export const webexPlugin: ChannelPlugin<ResolvedWebexAccount> = {
       const section = config.channels?.webex ?? {};
 
       if (accountId === DEFAULT_ACCOUNT_ID) {
-        const { token, webhookUrl, webhookSecret, dmPolicy, allowFrom, ...rest } = section;
+        const { token, dmPolicy, allowFrom, ...rest } = section;
         return {
           ...config,
           channels: {
@@ -1661,31 +1488,41 @@ export const webexPlugin: ChannelPlugin<ResolvedWebexAccount> = {
       });
 
       log?.info?.(
-        `[${account.accountId}] starting Webex provider (webhook mode)`
+        `[${account.accountId}] starting Webex provider (websocket mode)`
       );
 
-      const webhookHandler = new WebexWebhookHandler(account.config);
-      await webhookHandler.initialize();
+      const eventHandler = new WebexWebhookHandler(account.config);
+      await eventHandler.initialize();
 
-      try {
-        await webhookHandler.registerWebhooks();
-        log?.info?.(`[${account.accountId}] webhooks registered`);
-      } catch (err) {
-        log?.warn?.(
-          `[${account.accountId}] failed to register webhooks: ${err instanceof Error ? err.message : err}`
-        );
-      }
-
-      const webhookPath = `/webhooks/webex/${account.accountId}`;
-      const unregister = registerWebexWebhookTarget(webhookPath, {
-        account,
-        config: account.config,
-        webhookHandler,
-      });
-
+      const mercury = new WebexMercuryTransport(
+        account.config,
+        account.accountId,
+        {
+          onPayload: (payload) => {
+            void dispatchTransportPayload({
+              payload,
+              account,
+              webhookHandler: eventHandler,
+            }).catch((err) => {
+              console.error(
+                `[webex:${account.accountId}] mercury dispatch failed: ${err instanceof Error ? err.message : err}`
+              );
+            });
+          },
+          onLog: (level, msg) => {
+            (log?.[level] ?? console[level === "error" ? "error" : "log"])?.(
+              msg
+            );
+          },
+        }
+      );
+      await mercury.start();
       log?.info?.(
-        `[${account.accountId}] HTTP webhook handler registered at ${webhookPath}`
+        `[${account.accountId}] mercury websocket transport started (no inbound endpoint)`
       );
+      const unregister = () => {
+        void mercury.stop();
+      };
 
       const abortSignal = ctx.abortSignal;
 

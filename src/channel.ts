@@ -6,7 +6,6 @@ import type {
   WebexChannelConfig,
   WebexChannelPlugin,
   WebexMessage,
-  WebexWebhook,
   WebexWebhookPayload,
   OpenClawEnvelope,
   OpenClawOutboundMessage,
@@ -68,21 +67,11 @@ export class WebexChannel implements WebexChannelPlugin {
     if (!config.token) {
       throw new Error('Webex channel config requires a token');
     }
-    if (!config.webhookUrl) {
-      throw new Error('Webex channel config requires a webhookUrl');
-    }
     if (!config.dmPolicy) {
       throw new Error('Webex channel config requires a dmPolicy');
     }
     if (config.dmPolicy === 'allowlisted' && (!config.allowFrom || config.allowFrom.length === 0)) {
       throw new Error('Webex channel config requires allowFrom when dmPolicy is "allowlisted"');
-    }
-
-    // Validate webhook URL format
-    try {
-      new URL(config.webhookUrl);
-    } catch {
-      throw new Error('Webex channel config webhookUrl must be a valid URL');
     }
   }
 
@@ -145,15 +134,14 @@ export class WebexChannel implements WebexChannelPlugin {
   }
 
   /**
-   * Handle incoming webhook
+   * Handle an inbound event payload
    */
   async handleWebhook(
-    payload: WebexWebhookPayload,
-    signature?: string
+    payload: WebexWebhookPayload
   ): Promise<OpenClawEnvelope | null> {
     this.ensureInitialized();
 
-    const envelope = await this.webhookHandler!.handleWebhook(payload, signature);
+    const envelope = await this.webhookHandler!.handleWebhook(payload);
 
     if (envelope) {
       // Notify all registered handlers
@@ -191,14 +179,6 @@ export class WebexChannel implements WebexChannelPlugin {
         console.error('Error in message handler:', error);
       }
     }
-  }
-
-  /**
-   * Register webhooks with Webex
-   */
-  async registerWebhooks(): Promise<WebexWebhook[]> {
-    this.ensureInitialized();
-    return this.webhookHandler!.registerWebhooks();
   }
 
   /**

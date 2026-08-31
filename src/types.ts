@@ -12,17 +12,11 @@ export interface WebexChannelConfig {
   /** Webex Bot access token */
   token: string;
 
-  /** Public URL where webhooks will be received */
-  webhookUrl: string;
-
   /** Policy for handling direct messages */
   dmPolicy: DmPolicy;
 
   /** List of allowed person IDs or emails (used when dmPolicy is 'allowlisted') */
   allowFrom?: string[];
-
-  /** Webhook secret for payload verification */
-  webhookSecret?: string;
 
   /** Base URL for Webex API (defaults to https://webexapis.com/v1) */
   apiBaseUrl?: string;
@@ -146,21 +140,6 @@ export interface AdaptiveCard {
   actions?: unknown[];
 }
 
-export interface WebexWebhook {
-  id: string;
-  name: string;
-  targetUrl: string;
-  resource: WebexWebhookResource;
-  event: WebexWebhookEvent;
-  filter?: string;
-  secret?: string;
-  status: 'active' | 'inactive';
-  created: string;
-  orgId: string;
-  createdBy: string;
-  appId: string;
-  ownedBy: 'creator' | 'org';
-}
 
 export type WebexWebhookResource =
   | 'messages'
@@ -221,14 +200,6 @@ export interface CreateMessageRequest {
   parentId?: string;
 }
 
-export interface CreateWebhookRequest {
-  name: string;
-  targetUrl: string;
-  resource: WebexWebhookResource;
-  event: WebexWebhookEvent;
-  filter?: string;
-  secret?: string;
-}
 
 export interface WebexApiError {
   message: string;
@@ -330,7 +301,6 @@ export interface WebexChannelPlugin {
   handleWebhook(payload: WebexWebhookPayload, signature?: string): Promise<OpenClawEnvelope | null>;
 
   /** Register webhooks with Webex */
-  registerWebhooks(): Promise<WebexWebhook[]>;
 
   /** Cleanup and shutdown */
   shutdown(): Promise<void>;

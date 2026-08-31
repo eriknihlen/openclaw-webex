@@ -12,7 +12,7 @@ export { id } from "./plugin";
 
 // Re-export existing classes for backwards compatibility and advanced usage
 export { WebexSender, WebexApiRequestError } from "./send";
-export { WebexWebhookHandler, WebhookValidationError } from "./webhook";
+export { WebexWebhookHandler } from "./webhook";
 export type { AttachmentActionEvent } from "./webhook";
 export { WebexChannel, createWebexChannel, createAndInitialize } from "./channel";
 export { webexPlugin } from "./channel-plugin";
@@ -51,13 +51,11 @@ export type {
   WebexMessage,
   WebexAttachment,
   AdaptiveCard,
-  WebexWebhook,
   WebexWebhookResource,
   WebexWebhookEvent,
   WebexWebhookPayload,
   WebexWebhookData,
   CreateMessageRequest,
-  CreateWebhookRequest,
   WebexApiError,
   PaginatedResponse,
   OpenClawEnvelope,

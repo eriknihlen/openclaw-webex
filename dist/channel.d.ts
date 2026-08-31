@@ -1,7 +1,7 @@
 /**
  * Webex Channel - Main Channel Logic
  */
-import type { WebexChannelConfig, WebexChannelPlugin, WebexMessage, WebexWebhook, WebexWebhookPayload, OpenClawEnvelope, OpenClawOutboundMessage, WebhookHandler } from './types';
+import type { WebexChannelConfig, WebexChannelPlugin, WebexMessage, WebexWebhookPayload, OpenClawEnvelope, OpenClawOutboundMessage, WebhookHandler } from './types';
 import { WebexSender } from './send';
 import { WebexWebhookHandler } from './webhook';
 /**
@@ -48,9 +48,9 @@ export declare class WebexChannel implements WebexChannelPlugin {
      */
     reply(roomId: string, parentId: string, text: string): Promise<WebexMessage>;
     /**
-     * Handle incoming webhook
+     * Handle an inbound event payload
      */
-    handleWebhook(payload: WebexWebhookPayload, signature?: string): Promise<OpenClawEnvelope | null>;
+    handleWebhook(payload: WebexWebhookPayload): Promise<OpenClawEnvelope | null>;
     /**
      * Register a message handler
      */
@@ -63,10 +63,6 @@ export declare class WebexChannel implements WebexChannelPlugin {
      * Notify all registered handlers of a new message
      */
     private notifyHandlers;
-    /**
-     * Register webhooks with Webex
-     */
-    registerWebhooks(): Promise<WebexWebhook[]>;
     /**
      * Get the sender instance for advanced operations
      */
