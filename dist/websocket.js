@@ -41,6 +41,16 @@ const PING_INTERVAL_MS = 15_000;
 const PONG_TIMEOUT_MS = 10_000;
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 60_000;
+/**
+ * Scheduled connection refresh: proactively tear down and rebuild the
+ * connection (with a fresh WDM device registration) every 24h, ±1h of
+ * jitter so multiple accounts don't refresh in lockstep. This bounds the
+ * rare "stale delivery" failure mode — a socket that still answers pongs
+ * while Cisco's side has stopped routing events to the registration —
+ * to at most one day. The refresh costs a ~2s reconnect window.
+ */
+const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+const REFRESH_JITTER_MS = 60 * 60 * 1_000;
 /** Build a Hydra-format Webex API id from a bare Mercury UUID. */
 function hydraId(kind, uuid) {
     return Buffer.from(`ciscospark://us/${kind}/${uuid}`).toString("base64url");
@@ -55,6 +65,7 @@ class WebexMercuryTransport {
     pingTimer;
     pongTimer;
     reconnectTimer;
+    refreshTimer;
     backoffMs = BACKOFF_MIN_MS;
     constructor(config, accountId, callbacks) {
         this.config = config;
@@ -73,12 +84,31 @@ class WebexMercuryTransport {
         this.stopped = false;
         await this.connect();
     }
+    /**
+     * Arm (or re-arm) the daily connection refresh. Runs from the `open`
+     * handler so the 24h clock restarts on every successful connect —
+     * including reconnects triggered by the refresh itself.
+     */
+    scheduleRefresh() {
+        if (this.refreshTimer)
+            clearTimeout(this.refreshTimer);
+        const delay = REFRESH_INTERVAL_MS + Math.floor(Math.random() * REFRESH_JITTER_MS);
+        this.refreshTimer = setTimeout(() => {
+            this.refreshTimer = undefined;
+            if (this.stopped)
+                return;
+            this.log("info", "scheduled connection refresh (staleness guard)");
+            this.scheduleReconnect("scheduled refresh");
+        }, delay);
+    }
     /** Close the socket and best-effort delete the WDM device. */
     async stop() {
         this.stopped = true;
         this.clearTimers();
         if (this.reconnectTimer)
             clearTimeout(this.reconnectTimer);
+        if (this.refreshTimer)
+            clearTimeout(this.refreshTimer);
         try {
             this.ws?.close();
         }
@@ -157,6 +187,7 @@ class WebexMercuryTransport {
                 data: { token: `Bearer ${this.config.token}` },
             }));
             this.startPing();
+            this.scheduleRefresh();
             this.log("info", "mercury websocket connected");
         });
         ws.addEventListener("message", (event) => {

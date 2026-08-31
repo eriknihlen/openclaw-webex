@@ -1,86 +1,76 @@
 # openclaw-webex
 
-OpenClaw channel plugin for Cisco Webex. Multi-agent dispatch, AdaptiveCards, hardened webhook lifecycle, and rich live progress reporting.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Node >= 22](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
+[![TypeScript](https://img.shields.io/badge/built%20with-TypeScript-3178c6.svg)](https://www.typescriptlang.org)
+[![Transport: WebSocket](https://img.shields.io/badge/transport-websocket-orange.svg)](#how-it-works)
+[![OpenClaw 2026.8+](https://img.shields.io/badge/openclaw-2026.8%2B-8a2be2.svg)](https://github.com/openclaw/openclaw)
+
+**Cisco Webex channel plugin for OpenClaw.** Connects Webex bots to OpenClaw agents
+over an outbound WebSocket — no public URL, no tunnels, no inbound firewall rules.
+Multi-agent dispatch, Adaptive Cards, live progress reporting, and a
+default-deny sender allowlist.
 
 ---
 
-## What you get
+## Highlights
 
-**Multi-agent dispatch.** One OpenClaw gateway can host any number of named Webex bots, each routed to its own agent (`agent: "main"`, `agent: "ops-bot"`, etc.). Inbound messages and card submissions reach the right agent's session via SessionKey prefix routing.
+- **Outbound-only transport** — a single `wss://` connection to Cisco's Mercury
+  push service on port 443. Works behind strict firewalls (443-egress-only is
+  enough). Self-healing: app-level keepalive, jittered exponential backoff, and
+  a daily connection refresh that guards against stale registrations.
+- **Multi-agent dispatch** — one gateway hosts any number of named bots, each
+  routed to its own OpenClaw agent.
+- **Live progress in chat** — the bot narrates what the agent is doing
+  (*Reading `file`*, *Running `git status`*), editing a single message in place
+  and staying under Webex's 10-edit cap. Optional live reasoning stream.
+- **Adaptive Cards** — ready-made card builders (`factCard`, `statusCard`,
+  `approvalCard`), local validation against Webex's card limits, and button
+  submissions dispatched back to the right agent session.
+- **Webex-aware formatting** — replies auto-chunk at safe byte boundaries and
+  thread under the first message; markdown tables are rewritten into aligned
+  code blocks (Webex renders no pipe tables); group replies @mention the
+  requester.
+- **Secure by default** — `dmPolicy` defaults to `deny`; the allowlist applies
+  uniformly to direct **and** group rooms; inbound attachments are downloaded
+  with a MIME allowlist and size cap; progress output passes best-effort secret
+  redaction.
 
-**Resilient webhook lifecycle.** Registration uses `PUT /webhooks/{id}` to refresh existing rows in place rather than `DELETE` + `POST`, which sidesteps Webex's heavy `/webhooks` DELETE rate limit (we observed `Retry-After` up to 755 s in production). Provider lifetime is anchored to `ctx.abortSignal`, so the runtime never thinks a webhook-mode bot has "finished" and restarts it on a loop.
+## How it works
 
-**Rich live progress.** As the agent moves through reasoning → tool calls → writing, the bot shows what's happening in chat:
-
-- **`Reading` `` `/path/to/file` ``**, **`Running` `` `git status` ``**, **`Searching for` `` `pattern` ``**, **`Spawning agent`** *task name*, etc.
-- For the first ~8 transitions, **the same message edits in place** (`PUT /messages/{id}`); after that the reporter switches to append so the Webex 10-edit cap can't be hit.
-- Reasoning-stream tail can be opt-in streamed live (`progressStreamReasoning: true`), with markdown-aware truncation and stripped backticks/asterisks so a stray token in the model's deliberation can't break the renderer.
-- Per-tool argument detail is extracted (file paths, commands, search patterns), so users see "**Running** `git status`" instead of "Running tool `Bash`".
-
-**Webex-aware reply formatting.**
-
-- Replies > 7200 bytes auto-chunk on paragraph → sentence → word → hard-slice boundaries; chunks 2..N thread under the first.
-- Markdown pipe-tables in agent output are rewritten as aligned monospace code blocks (Webex doesn't render `|`-tables).
-- Auto-`@mention` of the requester on the first chunk in group rooms (DMs skip — Webex ignores it there).
-- `text` field is always set alongside `markdown` so non-markdown clients get a readable fallback.
-
-**AdaptiveCards builders & button submissions.**
-
-- Three ready-to-use card templates (`factCard`, `statusCard`, `approvalCard`) emit Webex-compatible AdaptiveCards 1.3.
-- Local `validateForWebex(card)` rejects elements Webex's server-side validator would reject (`Media`, `Action.Execute`, `verticalContentAlignment`, `height` on `ColumnSet`, > 20 top-level actions) — surfaces violations before the API round-trip.
-- Plugin registers `attachmentActions` webhooks. Button presses are fetched via `GET /attachment/actions/{id}`, flattened into a synthetic message, and dispatched to the agent the room is already bound to.
-- Optional `__openclawSessionKey` field on a card's submit data routes the response to a specific session — useful for cross-room flows (post a card in one space, route the answer to a session in another).
-
-**Hardened auth path.**
-
-- HMAC-SHA1 webhook signature verification (`webhookSecret`); when configured, an absent `X-Spark-Signature` header is rejected (no silent bypass).
-- Length-checked `crypto.timingSafeEqual` so malformed signatures surface as 401 not 500.
-- `dmPolicy` defaults to `"deny"`; the allowlist gate applies uniformly to direct *and* group rooms.
-
-**Inbound attachment ingest.** Webex file URLs require the bot token; the plugin downloads them with a MIME allowlist and configurable size cap, surfaces the local path to the agent as `MediaPath` / `MediaPaths`, and reaps temp files after dispatch.
-
-**Async webhook ACK.** Webex retries POSTs that haven't ACKed within ~10 s. The handler responds `200` immediately and dispatches the agent in the background, so a multi-minute reply never causes duplicate work.
-
----
-
-## Install
-
-Install directly from GitHub:
-
-```bash
-npm install github:eriknihlen/openclaw-webex
-# or
-npm install git+https://github.com/eriknihlen/openclaw-webex.git
+```
+OpenClaw gateway (this plugin)
+    │  1. register device        POST wdm-a.wbx2.com   (bot token)
+    │  2. hold open              wss://…wbx2.com:443   ← Cisco pushes events
+    │  3. fetch content          GET  webexapis.com    (bot token)
+    ▼
+agent dispatch → reply → POST webexapis.com/v1/messages
 ```
 
-OpenClaw discovers the plugin via the `openclaw` block in `package.json` — no manifest editing needed.
+Everything is outbound HTTPS/WSS on port 443, authenticated with the bot token.
+There is no inbound endpoint: nothing to expose, tunnel, or sign. Event payloads
+carry only IDs — message content is always fetched from the Webex API, never
+trusted from the push. If the socket drops (or answers pings without delivering
+events), the plugin re-registers and reconnects automatically.
 
-To run from a checkout:
+## Quick start
 
 ```bash
 git clone https://github.com/eriknihlen/openclaw-webex.git
 cd openclaw-webex
 npm install
 npm run build
-./scripts/deploy.sh   # rsync dist/ to ~/.openclaw/extensions/webex/ + restart the gateway
+./scripts/deploy.sh    # rsync dist/ into ~/.openclaw/extensions/webex/ + restart gateway
 ```
 
-`dist/` is committed to the repo, so a clean checkout is runtime-consumable without `npm install` if you only need the built artifacts.
-
----
-
-## Configure
-
-Minimal single-bot setup in `openclaw.json`:
+Minimal configuration in `openclaw.json`:
 
 ```jsonc
 {
   "channels": {
     "webex": {
       "enabled": true,
-      "token": "<bot access token>",
-      "webhookUrl": "https://<your-public-host>/webhooks/webex/default",
-      "webhookSecret": "<32-byte hex>",
+      "token": "<bot access token>",          // developer.webex.com → My Apps → Bot
       "dmPolicy": "allowlisted",
       "allowFrom": ["alice@example.com", "bob@example.com"]
     }
@@ -88,7 +78,10 @@ Minimal single-bot setup in `openclaw.json`:
 }
 ```
 
-Multi-bot setup with per-bot agent routing:
+That's the whole setup — no webhook URL, no signing secret, no reverse proxy.
+
+<details>
+<summary><b>Multi-bot setup with per-bot agent routing</b></summary>
 
 ```jsonc
 {
@@ -96,176 +89,97 @@ Multi-bot setup with per-bot agent routing:
     "webex": {
       "enabled": true,
       "dmPolicy": "allowlisted",
-      "allowFrom": ["alice@example.com", "bob@example.com"],
+      "allowFrom": ["alice@example.com"],
       "accounts": {
-        "ops-bot": {
-          "token": "<ops bot token>",
-          "webhookUrl": "https://host/webhooks/webex/ops-bot",
-          "webhookSecret": "<secret>",
-          "agent": "main",
-          "progressVerbosity": "detailed",
-          "progressStreamReasoning": true
-        },
-        "report-bot": {
-          "token": "<report bot token>",
-          "webhookUrl": "https://host/webhooks/webex/report-bot",
-          "webhookSecret": "<secret>",
-          "agent": "reports",
-          "progressVerbosity": "detailed"
-        }
+        "ops-bot":    { "token": "<token>", "agent": "main" },
+        "report-bot": { "token": "<token>", "agent": "reports" }
       }
     }
   }
 }
 ```
 
-### All config keys
+`accounts.<id>.*` keys override section-level values per bot.
 
-| Key | Type | Default | Meaning |
+</details>
+
+## Configuration reference
+
+| Key | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `false` | Master switch for the channel. |
-| `token` | string | — | Webex bot access token (`https://developer.webex.com/`). |
-| `webhookUrl` | string | — | Public URL Webex posts to. The path suffix (`…/webex/<accountId>`) is significant. |
-| `webhookSecret` | string | — | Strong random secret. When set, signatures are verified and unsigned requests are rejected. |
-| `dmPolicy` | enum | `"deny"` | `allow` / `deny` / `allowlisted` / `pairing`. Applies to all room types, not just DMs. |
-| `allowFrom` | string[] | `[]` | Person IDs or emails permitted to message the bot when `dmPolicy` is `allowlisted`. |
-| `apiBaseUrl` | string | `https://webexapis.com/v1` | Override for non-cloud Webex deployments. |
-| `maxRetries` | number | `3` | Retry attempts on retryable Webex API failures. |
-| `retryDelayMs` | number | `1000` | Base for exponential backoff. |
+| `token` | string | — | Webex bot access token. |
+| `dmPolicy` | enum | `"deny"` | `allow` · `deny` · `allowlisted` · `pairing`. Applies to all room types. |
+| `allowFrom` | string[] | `[]` | Person IDs or emails permitted when `dmPolicy` is `allowlisted`. |
 | `agent` | string | `"main"` | OpenClaw agent id this bot dispatches to. |
-| `progressVerbosity` | enum | `"detailed"` | `silent` / `minimal` / `detailed`. |
-| `progressPlaceholderText` | string | `"Working on it…"` | First-line text. |
-| `progressHeartbeatMs` | number | `300000` | Refresh "still working…" every N ms during long runs. `0` disables. |
-| `progressStreamReasoning` | bool | `false` | Stream reasoning-stream tail into the progress message. Opt-in — best-effort secret redaction. |
-| `showProgressPlaceholder` | bool | `true` | Off → no progress at all. |
+| `apiBaseUrl` | string | `https://webexapis.com/v1` | Override for non-cloud Webex deployments. |
+| `maxRetries` | number | `3` | Retry attempts on retryable API failures. |
+| `retryDelayMs` | number | `1000` | Base for exponential backoff. |
+| `progressVerbosity` | enum | `"detailed"` | `silent` · `minimal` · `detailed`. |
+| `progressPlaceholderText` | string | `"Working on it…"` | Initial progress line. |
+| `progressHeartbeatMs` | number | `300000` | "Still working…" refresh interval; `0` disables. |
+| `progressStreamReasoning` | bool | `false` | Stream the agent's reasoning tail into the progress message (opt-in). |
+| `showProgressPlaceholder` | bool | `true` | `false` disables progress output entirely. |
 
-`accounts.<id>.*` keys override the section-level values for a specific bot.
-
----
-
-## Programmatic use
-
-The plugin's helpers are exported so skills / agent code can build Webex-shaped output directly:
+## Adaptive Cards
 
 ```ts
-import {
-  factCard,
-  statusCard,
-  approvalCard,
-  validateForWebex,
-  splitForWebex,
-  escapeMarkdown,
-  mentionMarkdown,
-  transformMarkdownForWebex,
-} from "openclaw-webex";
+import { approvalCard, validateForWebex } from "openclaw-webex";
 
-// A weekly report card
-const card = factCard({
-  title: "Weekly Status — 2026-04-24",
-  subtitle: "Project XYZ",
-  facts: [
-    { title: "Milestones hit", value: "3 of 4" },
-    { title: "Blockers",       value: "1 (cert renewal)" },
-    { title: "Next focus",     value: "phase-2 rollout" },
-  ],
-  actions: [
-    { type: "Action.OpenUrl", title: "Open project", url: "https://example.com/proj" },
-  ],
-});
-validateForWebex(card);
-
-// An approval card whose submission routes back to the same room
-const approve = approvalCard({
+const card = approvalCard({
   title: "Approve deployment?",
   body: "Push the new policy to production?",
   includeNotes: true,
   data: { intent: "deploy-approval", releaseId: "v1.4.2" },
 });
+validateForWebex(card);   // rejects elements Webex's server would refuse
 
-// Now hand off via OpenClaw's outbound envelope
-return {
-  to: roomId,
-  content: { card },
-  parentId,
-};
+return { to: roomId, content: { card }, parentId };
 ```
 
-When the user clicks **Approve**, the plugin fetches the submission and dispatches it to the agent as a regular message:
-
-```
-[card-submission from Alice]
-intent: deploy-approval
-releaseId: v1.4.2
-decision: approve
-notes: looks good — proceed
-```
-
-`ctxPayload.CardSubmission` exposes the structured `{ actionId, messageId, inputs }` so skills can branch on the raw fields without re-parsing the summary.
-
----
-
-## Repository layout
-
-```
-.
-├── src/
-│   ├── channel-plugin.ts   # OpenClaw glue, webhook routing, dispatch
-│   ├── channel.ts          # WebexChannel high-level wrapper
-│   ├── send.ts             # WebexSender REST client + rate limiting
-│   ├── webhook.ts          # Signature verify, registration, attachment-actions
-│   ├── download.ts         # Inbound attachment download (MIME allowlist)
-│   ├── progress.ts         # Hybrid edit-in-place / append progress reporter
-│   ├── people-cache.ts     # GET /people/{id} cache
-│   ├── card-builder.ts     # AdaptiveCards templates + Webex validator
-│   ├── formatters.ts       # Markdown helpers (escape, split, table-rewrite)
-│   ├── types.ts            # Shared type defs
-│   └── plugin.ts / index.ts
-├── dist/                   # Built output (committed; runtime-consumable)
-├── scripts/deploy.sh       # build + rsync + restart
-├── tsconfig.json
-├── package.json
-├── openclaw.plugin.json
-├── LICENSE
-└── README.md
-```
-
----
+Button presses arrive back at the agent as a structured card-submission message;
+`ctxPayload.CardSubmission` exposes the raw `{ actionId, messageId, inputs }`.
+An optional `__openclawSessionKey` in the submit data routes the response to a
+specific session for cross-room flows.
 
 ## Development
 
 ```bash
-npm install        # dev deps
-npm run build      # tsc → dist/
-npm run dev        # tsc --watch
-npm run deploy     # build + rsync to ~/.openclaw/extensions/webex/ + restart gateway
+npm run build                    # tsc → dist/
+npm run dev                      # tsc --watch
+npm run deploy                   # build + rsync + gateway restart
 npm run deploy -- --no-restart   # build + rsync only
-npm run deploy -- --no-build     # rsync the existing dist/ only
-npm run test       # vitest (when tests are added)
 ```
 
-`scripts/deploy.sh` targets `$HOME/.openclaw/extensions/webex/` by default; override with `OPENCLAW_WEBEX_TARGET`.
-
-### Verifying a deploy
-
-After `./scripts/deploy.sh`, watch the gateway log for clean registration:
+A healthy deploy logs:
 
 ```
-[webex] [<account-id>] starting Webex provider (webhook mode)
-[webex] [<account-id>] webhooks registered
-[webex] [<account-id>] HTTP webhook handler registered at /webhooks/webex/<account-id>
+[webex] [<account>] starting Webex provider (websocket mode)
+[webex] [<account>] mercury websocket transport started (no inbound endpoint)
+[webex:<account>] mercury websocket connected
 ```
 
-No subsequent `auto-restart attempt` lines means the abort-signal lifetime + PUT-in-place webhook registration are both healthy.
+`scripts/deploy.sh` targets `~/.openclaw/extensions/webex/` by default;
+override with `OPENCLAW_WEBEX_TARGET`. `dist/` is committed, so a clean
+checkout is runtime-consumable without a build.
 
-The plugin also exposes a health probe:
+## Repository layout
 
-```bash
-curl http://<gateway-host>:18789/webhooks/webex/healthz
-# → { "status": "ok", "channel": "webex", "accountCount": 2, "accounts": [...] }
 ```
-
----
+src/
+├── websocket.ts       Mercury WebSocket transport (device registration,
+│                      keepalive, reconnect, daily refresh)
+├── webhook.ts         Event validation, allowlist, fetch, normalization
+├── channel-plugin.ts  OpenClaw glue: accounts, dispatch, progress wiring
+├── send.ts            REST client + rate limiting + message editing
+├── progress.ts        Edit-in-place progress reporter
+├── card-builder.ts    Adaptive Card templates + Webex validator
+├── formatters.ts      Markdown helpers (escape, chunk, table rewrite)
+├── download.ts        Inbound attachment download (MIME allowlist)
+├── people-cache.ts    People lookup cache
+└── types.ts           Shared types
+```
 
 ## License
 
-MIT. See [`LICENSE`](./LICENSE).
+[MIT](./LICENSE)

@@ -48,6 +48,7 @@ export declare class WebexMercuryTransport {
     private pingTimer?;
     private pongTimer?;
     private reconnectTimer?;
+    private refreshTimer?;
     private backoffMs;
     constructor(config: WebexChannelConfig, accountId: string, callbacks: MercuryTransportCallbacks);
     private log;
@@ -57,6 +58,12 @@ export declare class WebexMercuryTransport {
      * error); later reconnects are handled internally and never throw.
      */
     start(): Promise<void>;
+    /**
+     * Arm (or re-arm) the daily connection refresh. Runs from the `open`
+     * handler so the 24h clock restarts on every successful connect —
+     * including reconnects triggered by the refresh itself.
+     */
+    private scheduleRefresh;
     /** Close the socket and best-effort delete the WDM device. */
     stop(): Promise<void>;
     /**
