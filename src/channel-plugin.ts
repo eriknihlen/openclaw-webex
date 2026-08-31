@@ -51,6 +51,33 @@ const QUICK_COMMANDS = [
  * button. Returns false when the config offers no model list, letting
  * the caller fall back to the plain command card.
  */
+/**
+ * Resolve the gateway's allowed-model list. Prefers the runtime config
+ * object; falls back to reading the gateway config file directly, since
+ * the plugin runtime's config view has not been reliable for sections
+ * outside the plugin's own scope.
+ */
+function resolveModelAllowList(cfg: any): string[] {
+  const fromRuntime = cfg?.agents?.defaults?.modelPolicy?.allow;
+  if (Array.isArray(fromRuntime) && fromRuntime.length > 0) return fromRuntime;
+  try {
+    const fs = require("node:fs") as typeof import("node:fs");
+    const path = require("node:path") as typeof import("node:path");
+    const os = require("node:os") as typeof import("node:os");
+    const configPath =
+      process.env.OPENCLAW_CONFIG_PATH ??
+      path.join(
+        process.env.OPENCLAW_STATE_DIR ?? path.join(os.homedir(), ".openclaw"),
+        "openclaw.json"
+      );
+    const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    const fromFile = raw?.agents?.defaults?.modelPolicy?.allow;
+    return Array.isArray(fromFile) ? fromFile : [];
+  } catch {
+    return [];
+  }
+}
+
 async function deliverModelPickerCard(opts: {
   cfg: any;
   sender: WebexSender;
@@ -59,8 +86,13 @@ async function deliverModelPickerCard(opts: {
   replyText: string;
   accountId: string;
 }): Promise<boolean> {
-  const allow: string[] = opts.cfg?.agents?.defaults?.modelPolicy?.allow ?? [];
-  if (!Array.isArray(allow) || allow.length === 0) return false;
+  const allow = resolveModelAllowList(opts.cfg);
+  if (allow.length === 0) {
+    console.warn(
+      `[webex:${opts.accountId}] /model picker skipped: no modelPolicy.allow list found in runtime config or config file`
+    );
+    return false;
+  }
   const current = allow.find((m) => opts.replyText.includes(m));
   try {
     const card = commandPickerCard({
