@@ -477,6 +477,13 @@ async function processEnvelopeAsync(opts) {
         OriginatingChannel: "webex",
         OriginatingTo: `webex:${envelope.conversationId}`,
         MessageThreadId: envelope.metadata.parentId,
+        // Slash-command authorization (/status, /new, /compact, …). Core
+        // requires the channel to vouch for the sender; without this flag
+        // commands are silently swallowed. Any envelope that reaches this
+        // point has already passed the plugin's default-deny allowlist, so
+        // "allowlisted sender" ⇒ command-authorized — the same semantics
+        // the bundled Telegram/Discord channels apply to their allowlists.
+        CommandAuthorized: true,
     };
     if (mediaPaths.length > 0) {
         ctxPayload.MediaPath = mediaPaths[0];
