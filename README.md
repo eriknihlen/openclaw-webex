@@ -26,15 +26,23 @@ default-deny sender allowlist.
   and staying under Webex's 10-edit cap. Optional live reasoning stream.
 - **Adaptive Cards** — ready-made card builders (`factCard`, `statusCard`,
   `approvalCard`), local validation against Webex's card limits, and button
-  submissions dispatched back to the right agent session.
+  submissions dispatched back to the right agent session. Buttons that carry a
+  decision rewrite their own card into an audit record and can't be clicked
+  twice.
+- **Slash commands as cards** — `/status`, `/help`, `/model`, `/think` etc. are
+  answered with tap-to-run command cards (the `/model` and `/think` cards are
+  interactive pickers), gated by the same sender allowlist.
+- **Files both ways** — send a file to the bot and the agent receives it locally;
+  the agent can send files and rendered diagrams back into the chat, from a
+  sanctioned outbound directory with an extension allowlist.
 - **Webex-aware formatting** — replies auto-chunk at safe byte boundaries and
   thread under the first message; markdown tables are rewritten into aligned
   code blocks (Webex renders no pipe tables); group replies @mention the
   requester.
 - **Secure by default** — `dmPolicy` defaults to `deny`; the allowlist applies
-  uniformly to direct **and** group rooms; inbound attachments are downloaded
-  with a MIME allowlist and size cap; progress output passes best-effort secret
-  redaction.
+  uniformly to direct **and** group rooms; outbound files are confined to
+  allowlisted directories and extensions; progress output passes best-effort
+  secret redaction.
 
 ## How it works
 
@@ -52,6 +60,31 @@ There is no inbound endpoint: nothing to expose, tunnel, or sign. Event payloads
 carry only IDs — message content is always fetched from the Webex API, never
 trusted from the push. If the socket drops (or answers pings without delivering
 events), the plugin re-registers and reconnects automatically.
+
+## Prerequisites
+
+- **Node.js ≥ 22** — the transport uses the built-in global `WebSocket`/`FormData`.
+- **A running OpenClaw gateway (2026.8+)** with at least one agent configured.
+- **Outbound HTTPS/WSS on port 443** to `*.wbx2.com` and `webexapis.com`. No
+  inbound rules needed.
+- **A Webex bot access token** (see below).
+
+Runtime npm dependency: `node-fetch` (installed via `npm install`). Everything
+else the plugin uses is built into Node ≥ 22.
+
+### Creating a Webex bot
+
+1. Sign in at **[developer.webex.com](https://developer.webex.com)** with the
+   account that should own the bot.
+2. Go to **My Webex Apps → Create a New App → Create a Bot**.
+3. Give it a name, username, and icon. On creation, Webex shows a **bot access
+   token once** — copy it now; it isn't shown again (regenerate later under the
+   bot's page if lost). This is the `token` in the config below.
+4. **Add the bot to a space:** in the Webex app, open (or create) a space and
+   add the bot by its `…@webex.bot` address. In group spaces the bot only sees
+   messages that **@mention** it.
+5. **Allowlist your users:** put the emails (or person IDs) that may talk to the
+   bot in `allowFrom` — the bot ignores everyone else by default.
 
 ## Quick start
 
@@ -175,7 +208,8 @@ src/
 ├── progress.ts        Edit-in-place progress reporter
 ├── card-builder.ts    Adaptive Card templates + Webex validator
 ├── formatters.ts      Markdown helpers (escape, chunk, table rewrite)
-├── download.ts        Inbound attachment download (MIME allowlist)
+├── download.ts        Inbound attachment download (MIME allowlist, 423 retry)
+├── outbound-file-guard.ts  Path/extension gate for files the agent sends out
 ├── people-cache.ts    People lookup cache
 └── types.ts           Shared types
 ```
