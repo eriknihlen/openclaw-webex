@@ -68,6 +68,41 @@ export interface DownloadOptions {
   onWarn?: (message: string) => void;
 }
 
+// Webex scans/processes newly uploaded files server-side; while that's in
+// flight, the content URL returns 423 (Locked) for a few seconds. 429 (Too
+// Many Requests) gets the same bounded-retry treatment. Every other non-OK
+// status fails immediately, same as before.
+const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([423, 429]);
+/** Total attempts (1 initial + up to 4 retries) before giving up. */
+const MAX_DOWNLOAD_ATTEMPTS = 5;
+/** Base of the exponential backoff: 1s, 2s, 4s, 8s, ... */
+const RETRY_BASE_DELAY_MS = 1000;
+/** Backoff is capped so a single wait never balloons. */
+const RETRY_MAX_BACKOFF_MS = 8000;
+/** Upper bound honored even when the server's Retry-After asks for more. */
+const RETRY_AFTER_CAP_MS = 8000;
+/** Small random jitter added to computed (non-Retry-After) backoff. */
+const RETRY_JITTER_MS = 250;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Parses a Retry-After header (seconds form) into a capped millisecond delay. */
+function parseRetryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined;
+  return Math.min(seconds * 1000, RETRY_AFTER_CAP_MS);
+}
+
+function computeBackoffMs(attempt: number): number {
+  // attempt is 1-based for the *retry* number (1st retry, 2nd retry, ...).
+  const exponential = RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+  const capped = Math.min(exponential, RETRY_MAX_BACKOFF_MS);
+  return capped + Math.floor(Math.random() * RETRY_JITTER_MS);
+}
+
 export async function downloadWebexAttachment(
   url: string,
   token: string,
@@ -77,26 +112,53 @@ export async function downloadWebexAttachment(
   const doFetch = options.fetchImpl ?? fetch;
   const tmpDir = options.tmpDir ?? os.tmpdir();
 
-  const response = await doFetch(url, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  let response: Awaited<ReturnType<typeof doFetch>> | undefined;
+  for (let attempt = 1; attempt <= MAX_DOWNLOAD_ATTEMPTS; attempt++) {
+    response = await doFetch(url, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
 
-  if (!response.ok) {
-    throw new Error(
-      `Attachment download failed: ${response.status} ${response.statusText}`
+    if (response.ok) break;
+
+    const retryable = RETRYABLE_STATUSES.has(response.status);
+    const attemptsExhausted = attempt >= MAX_DOWNLOAD_ATTEMPTS;
+
+    if (!retryable) {
+      throw new Error(
+        `Attachment download failed: ${response.status} ${response.statusText}`
+      );
+    }
+
+    if (attemptsExhausted) {
+      throw new Error(
+        `Attachment download failed: ${response.status} ${response.statusText} ` +
+          `(still locked after ${attempt} attempts)`
+      );
+    }
+
+    const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
+    const delayMs = retryAfterMs ?? computeBackoffMs(attempt);
+    options.onWarn?.(
+      `attachment download got ${response.status}, retrying in ${delayMs}ms ` +
+        `(attempt ${attempt}/${MAX_DOWNLOAD_ATTEMPTS})`
     );
+    await sleep(delayMs);
   }
 
-  const declaredLength = Number(response.headers.get('content-length') ?? 0);
+  // Loop always either returns via throw or leaves `response` set to the
+  // final (ok) response before falling through.
+  const okResponse = response!;
+
+  const declaredLength = Number(okResponse.headers.get('content-length') ?? 0);
   if (declaredLength && declaredLength > maxBytes) {
     return null;
   }
 
   const contentType =
-    stripCharset(response.headers.get('content-type')) ?? undefined;
+    stripCharset(okResponse.headers.get('content-type')) ?? undefined;
   const name = parseFilenameFromDisposition(
-    response.headers.get('content-disposition') ?? ''
+    okResponse.headers.get('content-disposition') ?? ''
   );
 
   // MIME validation — reject anything outside the configured allowlist.
@@ -106,7 +168,7 @@ export async function downloadWebexAttachment(
     return null;
   }
 
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const buffer = Buffer.from(await okResponse.arrayBuffer());
   if (buffer.length > maxBytes) {
     return null;
   }
