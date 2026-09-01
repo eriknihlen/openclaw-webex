@@ -77,6 +77,11 @@ const node_url_1 = require("node:url");
  */
 exports.DEFAULT_OUTBOUND_FILE_ROOTS = [
     '/home/claw/.openclaw/workspace/outbound',
+    // OpenClaw core's managed outbound-media staging directory: when an agent
+    // emits a MEDIA: directive, core's own normalizer copies the (already
+    // vetted) file here and hands the channel THIS path — not the agent's
+    // original. Confirmed live: renders land as media/outbound/<name>---<uuid>.<ext>.
+    '/home/claw/.openclaw/media/outbound',
     '/tmp',
 ];
 /**
