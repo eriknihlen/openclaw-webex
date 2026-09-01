@@ -72,6 +72,25 @@ export interface WebexChannelConfig {
      * logged. Unset means no secret header is sent.
      */
     aiopsApprovalSecret?: string;
+    /**
+     * Allowed root directories for outbound local file sends (see
+     * outbound-file-guard.ts's resolveAllowedOutboundFile). A local path
+     * must canonicalize to somewhere inside one of these roots — and pass
+     * the extension allowlist and deny-list enforced alongside it — to be
+     * eligible for upload via WebexSender.sendLocalFile. Defaults to
+     * ["/home/claw/.openclaw/workspace/outbound", "/tmp"] when unset.
+     * Deliberately NOT the workspace root itself, which also holds live
+     * secrets (credential files, memory .bak snapshots, etc).
+     */
+    outboundFileRoots?: string[];
+    /**
+     * When a chunked reply would split into this many Webex messages or
+     * more, send it instead as a single message with the full reply
+     * attached as a markdown file (see deliverChunked in
+     * channel-plugin.ts). Default 4. Set to 0 to disable and always send
+     * chunked text.
+     */
+    longReplyAttachThreshold?: number;
 }
 export interface WebexPerson {
     id: string;

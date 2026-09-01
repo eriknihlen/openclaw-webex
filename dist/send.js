@@ -2,15 +2,107 @@
 /**
  * Webex Message Sending Module
  */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.WebexApiRequestError = exports.WebexSender = void 0;
+exports.resolveMessageTarget = resolveMessageTarget;
 const node_fetch_1 = __importDefault(require("node-fetch"));
+const fsp = __importStar(require("node:fs/promises"));
+const path = __importStar(require("node:path"));
 const DEFAULT_API_BASE_URL = 'https://webexapis.com/v1';
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_DELAY_MS = 1000;
+// Webex's documented upload cap for message attachments.
+const MAX_OUTBOUND_FILE_BYTES = 100 * 1024 * 1024;
+// Small extension -> content-type map for sendLocalFile. Not exhaustive —
+// Webex mostly just needs *a* reasonable type; unknown extensions fall
+// back to application/octet-stream.
+const CONTENT_TYPE_BY_EXTENSION = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.pdf': 'application/pdf',
+    '.txt': 'text/plain',
+    '.md': 'text/plain',
+    '.csv': 'text/plain',
+    '.json': 'text/plain',
+    '.xml': 'text/plain',
+    '.zip': 'application/zip',
+    '.log': 'text/plain',
+};
+function inferOutboundContentType(filePath) {
+    const ext = path.extname(filePath).toLowerCase();
+    return CONTENT_TYPE_BY_EXTENSION[ext] ?? 'application/octet-stream';
+}
+/**
+ * Resolve an OpenClaw `to` string into the roomId/toPersonId/
+ * toPersonEmail field Webex expects. Shared between buildMessageRequest
+ * (the normal JSON send path) and channel-plugin.ts's sendMedia local-
+ * file branch, so a local-file send targets the same kind of recipient
+ * (room, person by id, or person by email) that a URL-based send would
+ * for the same `to` value, instead of always assuming roomId.
+ */
+function resolveMessageTarget(to) {
+    if (to.includes('@')) {
+        return { toPersonEmail: to };
+    }
+    if (to.startsWith('Y2lzY29zcGFyazovL3')) {
+        // Base64-encoded Webex IDs - decode to check type
+        try {
+            const decoded = Buffer.from(to, 'base64').toString('utf-8');
+            if (decoded.includes('/ROOM/')) {
+                return { roomId: to };
+            }
+            if (decoded.includes('/PEOPLE/')) {
+                return { toPersonId: to };
+            }
+            // Default to roomId for other types
+            return { roomId: to };
+        }
+        catch {
+            // If decode fails, assume it's a roomId
+            return { roomId: to };
+        }
+    }
+    // Assume it's a roomId if not an email or a decodable Webex ID
+    return { roomId: to };
+}
 // Webex bot rate limit is ~5 msg/sec per bot. 250ms between requests
 // stays safely under 4 msg/sec, giving headroom for the occasional
 // webhook/delete happening in parallel.
@@ -103,6 +195,90 @@ class WebexSender {
             text,
             files: [fileUrl],
         });
+    }
+    /**
+     * Send a message with a LOCAL file attached, via multipart/form-data
+     * upload to POST /v1/messages. This is the only way to get a file the
+     * agent produced on disk (a report, a rendered diagram) into Webex —
+     * `send()`/`sendWithFile()` only ever hand Webex a URL it fetches
+     * itself, which doesn't work for output that never had one.
+     *
+     * Callers MUST have already run `filePath` through
+     * outbound-file-guard.ts's resolveAllowedOutboundFile — this method
+     * trusts the path it's given and does not re-validate it against any
+     * allowlist.
+     *
+     * Deliberately uses the Node/undici GLOBAL fetch + FormData + Blob
+     * here instead of the module's `node-fetch` v2 import (used
+     * everywhere else in this file): node-fetch v2 has no native
+     * multipart support and would need the `form-data` package, which
+     * this plugin doesn't depend on. `fetch` is shadowed to the
+     * node-fetch import at module scope, so `globalThis.fetch` is used
+     * explicitly to reach the real global implementation.
+     */
+    async sendLocalFile(opts) {
+        const { roomId, toPersonId, toPersonEmail, filePath, text, markdown, parentId } = opts;
+        if (!roomId && !toPersonId && !toPersonEmail) {
+            throw new Error('sendLocalFile: message must have a target: roomId, toPersonId, or toPersonEmail');
+        }
+        // Open once and stat/read off the same file descriptor rather than
+        // stat-by-path then read-by-path: the latter leaves a window (the
+        // /tmp root in particular is world-writable) where the path could
+        // be swapped between the two calls. A single fd pins us to whatever
+        // inode we opened.
+        const fh = await fsp.open(filePath, 'r');
+        let buffer;
+        try {
+            const stat = await fh.stat();
+            // A FIFO would hang readFile indefinitely — well past the fetch
+            // timeout below — and a directory throws a confusing EISDIR from
+            // readFile; reject both explicitly with a clear local error.
+            if (!stat.isFile()) {
+                throw new Error(`sendLocalFile: "${filePath}" is not a regular file`);
+            }
+            if (stat.size > MAX_OUTBOUND_FILE_BYTES) {
+                throw new Error(`sendLocalFile: "${filePath}" is ${stat.size} bytes, exceeding the ${MAX_OUTBOUND_FILE_BYTES}-byte (100 MB) Webex upload cap`);
+            }
+            buffer = await fh.readFile();
+        }
+        finally {
+            await fh.close();
+        }
+        const filename = path.basename(filePath);
+        const contentType = inferOutboundContentType(filename);
+        const form = new FormData();
+        if (roomId)
+            form.append('roomId', roomId);
+        if (toPersonId)
+            form.append('toPersonId', toPersonId);
+        if (toPersonEmail)
+            form.append('toPersonEmail', toPersonEmail);
+        if (text)
+            form.append('text', text);
+        if (markdown)
+            form.append('markdown', markdown);
+        if (parentId)
+            form.append('parentId', parentId);
+        form.append('files', new Blob([buffer], { type: contentType }), filename);
+        await this.acquireSlot();
+        const response = await globalThis.fetch(`${this.apiBaseUrl}/messages`, {
+            method: 'POST',
+            headers: {
+                // Deliberately NOT setting Content-Type: FormData computes the
+                // multipart boundary itself and sets the header to match: an
+                // explicit Content-Type here would omit/mismatch the boundary
+                // and Webex would fail to parse the body.
+                Authorization: `Bearer ${this.config.token}`,
+            },
+            body: form,
+            signal: AbortSignal.timeout(60_000),
+        });
+        if (!response.ok) {
+            // Never surface the response body here — it can echo back
+            // request content; status + statusText is enough to diagnose.
+            throw new Error(`sendLocalFile: Webex upload failed: HTTP ${response.status} ${response.statusText}`);
+        }
+        return (await response.json());
     }
     /**
      * Send a threaded reply
@@ -198,36 +374,9 @@ class WebexSender {
      * Build a Webex message request from an OpenClaw outbound message
      */
     buildMessageRequest(message) {
-        const request = {};
-        // Determine target: roomId, personId, or email
-        const to = message.to;
-        if (to.includes('@')) {
-            request.toPersonEmail = to;
-        }
-        else if (to.startsWith('Y2lzY29zcGFyazovL3')) {
-            // Base64-encoded Webex IDs - decode to check type
-            try {
-                const decoded = Buffer.from(to, 'base64').toString('utf-8');
-                if (decoded.includes('/ROOM/')) {
-                    request.roomId = to;
-                }
-                else if (decoded.includes('/PEOPLE/')) {
-                    request.toPersonId = to;
-                }
-                else {
-                    // Default to roomId for other types
-                    request.roomId = to;
-                }
-            }
-            catch {
-                // If decode fails, assume it's a roomId
-                request.roomId = to;
-            }
-        }
-        else {
-            // Assume it's a roomId if not an email
-            request.roomId = to;
-        }
+        const request = {
+            ...resolveMessageTarget(message.to),
+        };
         // Set content.
         //
         // Webex renders only the `markdown` field as formatted markdown; the `text`

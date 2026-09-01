@@ -2,6 +2,19 @@
  * Webex Message Sending Module
  */
 import type { WebexChannelConfig, WebexMessage, OpenClawOutboundMessage, AdaptiveCard } from './types';
+/**
+ * Resolve an OpenClaw `to` string into the roomId/toPersonId/
+ * toPersonEmail field Webex expects. Shared between buildMessageRequest
+ * (the normal JSON send path) and channel-plugin.ts's sendMedia local-
+ * file branch, so a local-file send targets the same kind of recipient
+ * (room, person by id, or person by email) that a URL-based send would
+ * for the same `to` value, instead of always assuming roomId.
+ */
+export declare function resolveMessageTarget(to: string): {
+    roomId?: string;
+    toPersonId?: string;
+    toPersonEmail?: string;
+};
 export declare class WebexSender {
     private config;
     private apiBaseUrl;
@@ -41,6 +54,35 @@ export declare class WebexSender {
      * Send a message with file attachment
      */
     sendWithFile(roomId: string, text: string, fileUrl: string): Promise<WebexMessage>;
+    /**
+     * Send a message with a LOCAL file attached, via multipart/form-data
+     * upload to POST /v1/messages. This is the only way to get a file the
+     * agent produced on disk (a report, a rendered diagram) into Webex —
+     * `send()`/`sendWithFile()` only ever hand Webex a URL it fetches
+     * itself, which doesn't work for output that never had one.
+     *
+     * Callers MUST have already run `filePath` through
+     * outbound-file-guard.ts's resolveAllowedOutboundFile — this method
+     * trusts the path it's given and does not re-validate it against any
+     * allowlist.
+     *
+     * Deliberately uses the Node/undici GLOBAL fetch + FormData + Blob
+     * here instead of the module's `node-fetch` v2 import (used
+     * everywhere else in this file): node-fetch v2 has no native
+     * multipart support and would need the `form-data` package, which
+     * this plugin doesn't depend on. `fetch` is shadowed to the
+     * node-fetch import at module scope, so `globalThis.fetch` is used
+     * explicitly to reach the real global implementation.
+     */
+    sendLocalFile(opts: {
+        roomId?: string;
+        toPersonId?: string;
+        toPersonEmail?: string;
+        filePath: string;
+        text?: string;
+        markdown?: string;
+        parentId?: string;
+    }): Promise<WebexMessage>;
     /**
      * Send a threaded reply
      */

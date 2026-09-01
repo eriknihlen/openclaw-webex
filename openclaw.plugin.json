@@ -69,6 +69,22 @@
         "type": "string",
         "description": "Optional shared secret sent as the X-AIOps-Approval-Secret header on every approval/rejection request to the AIOps dashboard."
       },
+      "outboundFileRoots": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Allowed root directories for outbound local file sends (e.g. agent-produced reports or rendered diagrams). A local path must resolve inside one of these roots, and have an attachment-safe extension (images, pdf, txt/md/csv/json/xml/log, zip, svg), to be uploaded to Webex. Not the workspace root itself, which also holds live secrets.",
+        "default": [
+          "/home/claw/.openclaw/workspace/outbound",
+          "/tmp"
+        ]
+      },
+      "longReplyAttachThreshold": {
+        "type": "number",
+        "description": "When a chunked reply would split into this many Webex messages or more, send it instead as a single message with the full reply attached as a markdown file. Set to 0 to disable and always send chunked text.",
+        "default": 4
+      },
       "progressVerbosity": {
         "type": "string",
         "enum": [
@@ -145,6 +161,15 @@
             },
             "aiopsApprovalSecret": {
               "type": "string"
+            },
+            "outboundFileRoots": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "longReplyAttachThreshold": {
+              "type": "number"
             },
             "showProgressPlaceholder": {
               "type": "boolean"
@@ -240,6 +265,22 @@
           "aiopsApprovalSecret": {
             "type": "string"
           },
+          "outboundFileRoots": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Allowed root directories for outbound local file sends (e.g. agent-produced reports or rendered diagrams). A local path must resolve inside one of these roots, and have an attachment-safe extension (images, pdf, txt/md/csv/json/xml/log, zip, svg), to be uploaded to Webex. Not the workspace root itself, which also holds live secrets.",
+            "default": [
+              "/home/claw/.openclaw/workspace/outbound",
+              "/tmp"
+            ]
+          },
+          "longReplyAttachThreshold": {
+            "type": "number",
+            "description": "When a chunked reply would split into this many Webex messages or more, send it instead as a single message with the full reply attached as a markdown file. Set to 0 to disable and always send chunked text.",
+            "default": 4
+          },
           "showProgressPlaceholder": {
             "type": "boolean"
           },
@@ -305,6 +346,15 @@
                 },
                 "aiopsApprovalSecret": {
                   "type": "string"
+                },
+                "outboundFileRoots": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "longReplyAttachThreshold": {
+                  "type": "number"
                 },
                 "showProgressPlaceholder": {
                   "type": "boolean"

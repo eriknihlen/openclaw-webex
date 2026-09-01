@@ -8,6 +8,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.webexPlugin = void 0;
 exports.setPluginRuntime = setPluginRuntime;
 const send_1 = require("./send");
+const outbound_file_guard_1 = require("./outbound-file-guard");
 const webhook_1 = require("./webhook");
 const download_1 = require("./download");
 const progress_1 = require("./progress");
@@ -130,6 +131,7 @@ async function deliverCommandReplyCard(opts) {
         authorId: opts.authorId,
         authorDisplayName: opts.authorDisplayName,
         accountId: opts.accountId,
+        config: opts.config,
     });
 }
 /**
@@ -474,7 +476,7 @@ const DEFAULT_ACCOUNT_ID = "default";
  *
  */
 async function deliverChunked(opts) {
-    const { sender, roomId, parentId, replyText, roomType, authorId, authorDisplayName, accountId, } = opts;
+    const { sender, roomId, parentId, replyText, roomType, authorId, authorDisplayName, accountId, config, } = opts;
     const mention = roomType === "group" && authorId
         ? (0, formatters_1.mentionMarkdown)(authorId, authorDisplayName)
         : "";
@@ -484,6 +486,27 @@ async function deliverChunked(opts) {
     const rewritten = (0, formatters_1.transformMarkdownForWebex)(replyText);
     const chunks = (0, formatters_1.splitForWebex)(rewritten);
     const shouldUseMarkdown = (0, formatters_1.looksMarkdown)(rewritten) || mention.length > 0;
+    // Long replies: instead of spamming N chunked messages, send the full
+    // reply as a single message with a markdown file attached, once the
+    // chunk count crosses the configured threshold. Best-effort — any
+    // failure here falls through to the normal chunked loop below so a
+    // reply is never lost over an attachment problem.
+    const attachThreshold = config.longReplyAttachThreshold ?? 4;
+    if (attachThreshold > 0 && chunks.length >= attachThreshold) {
+        const attached = await deliverLongReplyAsAttachment({
+            sender,
+            roomId,
+            parentId,
+            rewritten,
+            mention,
+            authorDisplayName,
+            shouldUseMarkdown,
+            config,
+            accountId,
+        });
+        if (attached)
+            return;
+    }
     // Thread 2..N replies under the first Webex message we post, so the
     // chunks read as one logical response rather than scattered messages.
     let firstMessageId;
@@ -509,6 +532,70 @@ async function deliverChunked(opts) {
             console.warn(`[webex:${accountId}] reply chunk ${i + 1}/${chunks.length} failed: ${err instanceof Error ? err.message : err}`);
             // Abort the rest — better to stop than spam partial chunks.
             return;
+        }
+    }
+}
+/**
+ * Deliver a long reply as one message with the full text attached as a
+ * markdown file, instead of the N-message chunked flow deliverChunked
+ * normally uses. Writes `rewritten` to a temp file in os.tmpdir(),
+ * uploads it via WebexSender.sendLocalFile, then removes the temp file.
+ *
+ * Runs the temp path through resolveAllowedOutboundFile even though
+ * os.tmpdir() is inside the default allowed roots — every path reaching
+ * sendLocalFile goes through the same gate, no exceptions for paths we
+ * authored ourselves.
+ *
+ * Returns false (never throws) on any failure — missing config,
+ * temp-file I/O, the gate rejecting the path, the upload itself — so
+ * the caller falls through to normal chunked delivery. Losing the reply
+ * outright is worse than losing the "single attachment" convenience.
+ */
+async function deliverLongReplyAsAttachment(opts) {
+    const { sender, roomId, parentId, rewritten, mention, authorDisplayName, shouldUseMarkdown, config, accountId, } = opts;
+    // Dynamic require to avoid hoisting fs/os to the top of the module
+    // (matches cleanupTempFiles below and resolveModelAllowList above).
+    const os = require("node:os");
+    const path = require("node:path");
+    const fsp = require("node:fs/promises");
+    const tempPath = path.join(os.tmpdir(), `marcus-reply-${Date.now()}.md`);
+    let wrote = false;
+    try {
+        // mode 0o600 keeps the file unreadable to other local users; flag
+        // "wx" requires exclusive creation — a pre-existing file, a
+        // same-millisecond name collision, or a symlink planted at tempPath
+        // all fail with EEXIST instead of silently writing through, and the
+        // catch below turns that into the safe chunked-delivery fallback.
+        await fsp.writeFile(tempPath, rewritten, {
+            encoding: "utf-8",
+            mode: 0o600,
+            flag: "wx",
+        });
+        wrote = true;
+        const safePath = (0, outbound_file_guard_1.resolveAllowedOutboundFile)(tempPath, config);
+        const captionBody = `${rewritten.slice(0, 500)}… (full reply attached)`;
+        const text = mention
+            ? `${authorDisplayName ?? ""} ${captionBody}`.trim()
+            : captionBody;
+        const markdownBody = mention ? `${mention} ${captionBody}` : captionBody;
+        await sender.sendLocalFile({
+            roomId,
+            filePath: safePath,
+            text,
+            markdown: shouldUseMarkdown ? markdownBody : undefined,
+            parentId,
+        });
+        return true;
+    }
+    catch (err) {
+        console.warn(`[webex:${accountId}] long-reply attachment delivery failed, falling back to chunked text: ${err instanceof Error ? err.message : err}`);
+        return false;
+    }
+    finally {
+        if (wrote) {
+            await fsp.unlink(tempPath).catch((err) => {
+                console.warn(`[webex:${accountId}] long-reply temp file cleanup failed for ${tempPath}: ${err instanceof Error ? err.message : err}`);
+            });
         }
     }
 }
@@ -711,6 +798,7 @@ async function processEnvelopeAsync(opts) {
                                 authorId: envelope.author.id,
                                 authorDisplayName: envelope.author.displayName,
                                 accountId: account.accountId,
+                                config: account.config,
                             });
                         }
                         else {
@@ -723,6 +811,7 @@ async function processEnvelopeAsync(opts) {
                                 authorId: envelope.author.id,
                                 authorDisplayName: envelope.author.displayName,
                                 accountId: account.accountId,
+                                config: account.config,
                             });
                         }
                         replyDelivered = true;
@@ -831,6 +920,7 @@ async function dispatchCommandFromCard(opts) {
                         authorId: personId,
                         authorDisplayName: displayName,
                         accountId: account.accountId,
+                        config: account.config,
                     });
                 },
                 onError: (err) => {
@@ -1381,6 +1471,7 @@ async function processAttachmentActionAsync(opts) {
                             authorId: action.personId,
                             authorDisplayName: displayName,
                             accountId: account.accountId,
+                            config: account.config,
                         });
                     }
                 },
@@ -1508,6 +1599,9 @@ function resolveWebexAccount(opts) {
                     section.progressStreamReasoning,
                 aiopsApprovalUrl: namedAccount.aiopsApprovalUrl ?? section.aiopsApprovalUrl,
                 aiopsApprovalSecret: namedAccount.aiopsApprovalSecret ?? section.aiopsApprovalSecret,
+                outboundFileRoots: namedAccount.outboundFileRoots ?? section.outboundFileRoots,
+                longReplyAttachThreshold: namedAccount.longReplyAttachThreshold ??
+                    section.longReplyAttachThreshold,
             },
         };
     }
@@ -1537,6 +1631,8 @@ function resolveWebexAccount(opts) {
                 progressStreamReasoning: section.progressStreamReasoning,
                 aiopsApprovalUrl: section.aiopsApprovalUrl,
                 aiopsApprovalSecret: section.aiopsApprovalSecret,
+                outboundFileRoots: section.outboundFileRoots,
+                longReplyAttachThreshold: section.longReplyAttachThreshold,
             },
         };
     }
@@ -1746,6 +1842,32 @@ exports.webexPlugin = {
             const rewritten = typeof text === "string" && text.length > 0
                 ? (0, formatters_1.transformMarkdownForWebex)(text)
                 : text;
+            // A local absolute path or file:// URL means the agent produced
+            // this file itself (report, rendered diagram) rather than
+            // pointing at something Webex can fetch by URL. Those never had
+            // a public URL, so they have to go through the multipart upload
+            // path instead of the normal files:[url] flow below. http(s)
+            // URLs are untouched — same flow as before this feature existed.
+            if (typeof mediaUrl === "string" &&
+                (mediaUrl.startsWith("/") || mediaUrl.startsWith("file://"))) {
+                const localPath = (0, outbound_file_guard_1.resolveAllowedOutboundFile)(mediaUrl, account.config);
+                // Resolve `to` the same way the URL-based send below does (via
+                // sender.send -> buildMessageRequest), so a local-file send can
+                // target a person by id/email, not just a room.
+                const target = (0, send_1.resolveMessageTarget)(to);
+                const result = await sender.sendLocalFile({
+                    ...target,
+                    filePath: localPath,
+                    text: rewritten,
+                    markdown: (0, formatters_1.looksMarkdown)(rewritten) ? rewritten : undefined,
+                    parentId: replyToId ?? (threadId != null ? String(threadId) : undefined),
+                });
+                return {
+                    channel: "webex",
+                    messageId: result.id,
+                    roomId: result.roomId,
+                };
+            }
             const result = await sender.send({
                 to,
                 content: {
