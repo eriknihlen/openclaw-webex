@@ -51,6 +51,13 @@ export interface ProgressReporterOptions {
 
 export interface ProgressReporter {
   /**
+   * Wall-clock time (Date.now()) this reporter was created. Callers
+   * that want a "· 2m" elapsed suffix on a progress line (without
+   * spending an extra edit to add one) compute it off this rather than
+   * tracking their own turn-start timestamp.
+   */
+  readonly startedAt: number;
+  /**
    * Post a progress line. Duplicates (same as previous) are skipped.
    *
    * `text` is the plain-text fallback shown on clients that don't render
@@ -73,6 +80,7 @@ export function createProgressReporter(
   const initialDebounceMs =
     opts.initialDebounceMs ?? DEFAULT_INITIAL_DEBOUNCE_MS;
   const editableLimit = opts.editableLimit ?? DEFAULT_EDITABLE_LIMIT;
+  const startedAt = Date.now();
 
   let lastPostedText: string | undefined;
   let pendingText: string | undefined;
@@ -153,6 +161,7 @@ export function createProgressReporter(
   };
 
   return {
+    startedAt,
     update(text: string, markdown?: string) {
       if (closed) return;
       if (!text) return;

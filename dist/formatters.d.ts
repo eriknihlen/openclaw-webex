@@ -78,6 +78,21 @@ export declare function transformMarkdownForWebex(md: string): string;
  */
 export declare function trimToSafeMarkdownBoundary(s: string): string;
 /**
+ * Human-readable elapsed time for the final-answer "⏱ Worked for …"
+ * summary. Returns undefined for anything under 10s — fast replies
+ * don't need a timer stamp. Under a minute: "42s". A minute or more:
+ * "3m" (whole minutes) or "3m 15s" when there's a leftover remainder.
+ */
+export declare function formatElapsed(ms: number): string | undefined;
+/**
+ * Compact elapsed-time suffix for live progress lines (e.g.
+ * "Running `git status` · 2m"). Unlike formatElapsed, this shows
+ * sub-10s durations too — a ticking progress line is useful even in
+ * the first few seconds — and drops the leftover-seconds remainder
+ * once we're into minutes, to keep the suffix short.
+ */
+export declare function formatElapsedShort(ms: number): string;
+/**
  * Best-effort detection of whether a string is "markdown-looking" (has
  * tokens the plugin should honour by setting the `markdown` field on
  * POST /messages even if the agent didn't explicitly set it).

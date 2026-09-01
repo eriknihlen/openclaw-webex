@@ -135,6 +135,25 @@ async function deliverCommandReplyCard(opts) {
     });
 }
 /**
+ * Append a compact " · 2m" / " · 45s" elapsed suffix to a progress
+ * line, computed off the reporter's own startedAt. This rides the edit
+ * that's already happening for the transition (tool start, command
+ * output, …). Caveat: the suffix changes each second under a minute, so
+ * two consecutive byte-identical transition lines that progress.ts would
+ * otherwise dedup (suppress the second edit) now differ and each posts.
+ * Bounded and graceful: it only affects duplicate lines in the first
+ * minute (minute granularity self-heals it after 60s), and the worst
+ * case is reaching the append-mode flip at editableLimit=8 a little
+ * sooner — never the Webex 10-edit hard cap. See progress.ts flush().
+ */
+function withElapsedSuffix(line, startedAt) {
+    const suffix = (0, formatters_1.formatElapsedShort)(Date.now() - startedAt);
+    return {
+        text: `${line.text} · ${suffix}`,
+        markdown: `${line.markdown} · ${suffix}`,
+    };
+}
+/**
  * Run `fn` outside the gateway's inherited root-work admission context.
  *
  * Since OpenClaw 2026.8.1, every task runs under a "root work" admission lease
@@ -396,7 +415,7 @@ function buildProgressReplyOptions(progress, verbosity, streamReasoning) {
         },
         onToolStart: (evt) => {
             resetReasoning();
-            const line = formatToolStart(evt);
+            const line = withElapsedSuffix(formatToolStart(evt), progress.startedAt);
             progress.update(line.text, line.markdown);
         },
         // onItemEvent fires for generic work items (often carries richer
@@ -411,12 +430,11 @@ function buildProgressReplyOptions(progress, verbosity, streamReasoning) {
             const label = evt.name && evt.name !== evt.kind ? evt.name : evt.kind;
             const clean = truncate(redactSecrets(detail), 200);
             const q = (0, formatters_1.escapeMarkdown)(clean);
-            if (label && label !== "exec" && label !== "generic") {
-                progress.update(`${label}: ${clean}`, `**${(0, formatters_1.escapeMarkdown)(label)}** \`${q}\``);
-            }
-            else {
-                progress.update(clean, `\`${q}\``);
-            }
+            const line = label && label !== "exec" && label !== "generic"
+                ? { text: `${label}: ${clean}`, markdown: `**${(0, formatters_1.escapeMarkdown)(label)}** \`${q}\`` }
+                : { text: clean, markdown: `\`${q}\`` };
+            const withSuffix = withElapsedSuffix(line, progress.startedAt);
+            progress.update(withSuffix.text, withSuffix.markdown);
         },
         onCommandOutput: (evt) => {
             if (evt.status === "completed" || evt.status === "failed")
@@ -427,10 +445,12 @@ function buildProgressReplyOptions(progress, verbosity, streamReasoning) {
             const command = evt.command ?? evt.summary;
             if (command) {
                 const clean = truncate(redactSecrets(command), 200);
-                progress.update(`Running: ${clean}`, `**Running** \`${(0, formatters_1.escapeMarkdown)(clean)}\``);
+                const line = withElapsedSuffix({ text: `Running: ${clean}`, markdown: `**Running** \`${(0, formatters_1.escapeMarkdown)(clean)}\`` }, progress.startedAt);
+                progress.update(line.text, line.markdown);
             }
             else if (evt.name && evt.name !== "exec") {
-                progress.update(`Running ${evt.name}…`, `Running *${(0, formatters_1.escapeMarkdown)(evt.name)}*…`);
+                const line = withElapsedSuffix({ text: `Running ${evt.name}…`, markdown: `Running *${(0, formatters_1.escapeMarkdown)(evt.name)}*…` }, progress.startedAt);
+                progress.update(line.text, line.markdown);
             }
         },
         onPlanUpdate: ({ title }) => {
@@ -922,11 +942,28 @@ async function processEnvelopeAsync(opts) {
                             });
                         }
                         else {
+                            // "Worked for X" summary — only on the main text-reply
+                            // path (never command turns, which are answered via the
+                            // card branches above), and only when progress reporting
+                            // was actually on for this turn (same gate that decided
+                            // whether to show the "Working on it…" placeholder).
+                            // deliverChunked prepends the group @mention as
+                            // `${mention} ${chunk}` on the first chunk, so putting
+                            // the elapsed line as the first line of replyText here
+                            // means the rendered order is "@mention ⏱ Worked for Xm"
+                            // followed by a blank line and the answer — mention still
+                            // leads, elapsed reads naturally right after it.
+                            const elapsedLabel = showPlaceholder
+                                ? (0, formatters_1.formatElapsed)(Date.now() - startedAt)
+                                : undefined;
+                            const replyText = elapsedLabel
+                                ? `⏱ Worked for ${elapsedLabel}\n\n${payload.text}`
+                                : payload.text;
                             await deliverChunked({
                                 sender,
                                 roomId: envelope.conversationId,
                                 parentId: envelope.metadata.parentId,
-                                replyText: payload.text,
+                                replyText,
                                 roomType: envelope.metadata.roomType,
                                 authorId: envelope.author.id,
                                 authorDisplayName: envelope.author.displayName,

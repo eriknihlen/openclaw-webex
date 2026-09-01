@@ -32,6 +32,7 @@ function createProgressReporter(opts) {
     const { sender, to, parentId, onWarn } = opts;
     const initialDebounceMs = opts.initialDebounceMs ?? DEFAULT_INITIAL_DEBOUNCE_MS;
     const editableLimit = opts.editableLimit ?? DEFAULT_EDITABLE_LIMIT;
+    const startedAt = Date.now();
     let lastPostedText;
     let pendingText;
     let pendingMarkdown;
@@ -109,6 +110,7 @@ function createProgressReporter(opts) {
         debouncePending = false;
     };
     return {
+        startedAt,
         update(text, markdown) {
             if (closed)
                 return;

@@ -16,6 +16,8 @@ exports.splitForWebex = splitForWebex;
 exports.stripMarkdownSyntax = stripMarkdownSyntax;
 exports.transformMarkdownForWebex = transformMarkdownForWebex;
 exports.trimToSafeMarkdownBoundary = trimToSafeMarkdownBoundary;
+exports.formatElapsed = formatElapsed;
+exports.formatElapsedShort = formatElapsedShort;
 exports.looksMarkdown = looksMarkdown;
 /**
  * Maximum bytes Webex accepts for text/markdown on POST /messages. We
@@ -261,6 +263,43 @@ function trimToSafeMarkdownBoundary(s) {
         out = out.slice(0, last).trimEnd();
     }
     return out;
+}
+/**
+ * Break an elapsed-ms duration into whole minutes/seconds. Shared by
+ * formatElapsed (final-answer "Worked for …" summary) and
+ * formatElapsedShort (live progress-line suffix) so the two stay
+ * consistent instead of each re-deriving minutes/seconds independently.
+ */
+function splitElapsed(ms) {
+    const totalSeconds = Math.floor(ms / 1000);
+    return { minutes: Math.floor(totalSeconds / 60), seconds: totalSeconds % 60 };
+}
+/**
+ * Human-readable elapsed time for the final-answer "⏱ Worked for …"
+ * summary. Returns undefined for anything under 10s — fast replies
+ * don't need a timer stamp. Under a minute: "42s". A minute or more:
+ * "3m" (whole minutes) or "3m 15s" when there's a leftover remainder.
+ */
+function formatElapsed(ms) {
+    if (ms < 10_000)
+        return undefined;
+    const { minutes, seconds } = splitElapsed(ms);
+    if (ms < 60_000)
+        return `${seconds}s`;
+    return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+}
+/**
+ * Compact elapsed-time suffix for live progress lines (e.g.
+ * "Running `git status` · 2m"). Unlike formatElapsed, this shows
+ * sub-10s durations too — a ticking progress line is useful even in
+ * the first few seconds — and drops the leftover-seconds remainder
+ * once we're into minutes, to keep the suffix short.
+ */
+function formatElapsedShort(ms) {
+    const { minutes, seconds } = splitElapsed(ms);
+    if (ms < 60_000)
+        return `${seconds}s`;
+    return `${minutes}m`;
 }
 /**
  * Best-effort detection of whether a string is "markdown-looking" (has

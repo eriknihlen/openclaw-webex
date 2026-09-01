@@ -48,6 +48,13 @@ export interface ProgressReporterOptions {
 }
 export interface ProgressReporter {
     /**
+     * Wall-clock time (Date.now()) this reporter was created. Callers
+     * that want a "· 2m" elapsed suffix on a progress line (without
+     * spending an extra edit to add one) compute it off this rather than
+     * tracking their own turn-start timestamp.
+     */
+    readonly startedAt: number;
+    /**
      * Post a progress line. Duplicates (same as previous) are skipped.
      *
      * `text` is the plain-text fallback shown on clients that don't render
