@@ -2161,9 +2161,21 @@ export const webexPlugin: ChannelPlugin<ResolvedWebexAccount> = {
       }
       const sender = new WebexSender(account.config);
 
+      // Rewrite unsupported markdown (pipe-tables) and set the `markdown`
+      // field the same way deliverChunked does for the normal reply path —
+      // otherwise agent-initiated sends through this outbound path render
+      // pipe-table garbage and literal `**` on Webex.
+      const rewritten =
+        typeof text === "string" && text.length > 0
+          ? transformMarkdownForWebex(text)
+          : text;
+
       const result = await sender.send({
         to,
-        content: { text },
+        content: {
+          text: rewritten,
+          markdown: looksMarkdown(rewritten) ? rewritten : undefined,
+        },
         parentId: replyToId ?? (threadId != null ? String(threadId) : undefined),
       });
 
@@ -2182,10 +2194,18 @@ export const webexPlugin: ChannelPlugin<ResolvedWebexAccount> = {
       }
       const sender = new WebexSender(account.config);
 
+      // Same markdown rewrite as sendText — the caption travels through
+      // the same `text`/`markdown` pair, only `files` differs.
+      const rewritten =
+        typeof text === "string" && text.length > 0
+          ? transformMarkdownForWebex(text)
+          : text;
+
       const result = await sender.send({
         to,
         content: {
-          text,
+          text: rewritten,
+          markdown: looksMarkdown(rewritten) ? rewritten : undefined,
           files: mediaUrl ? [mediaUrl] : undefined,
         },
         parentId: replyToId ?? (threadId != null ? String(threadId) : undefined),

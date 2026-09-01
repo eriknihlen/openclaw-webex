@@ -1713,9 +1713,19 @@ exports.webexPlugin = {
                 throw new Error(`Webex account ${accountId ?? DEFAULT_ACCOUNT_ID} is not configured`);
             }
             const sender = new send_1.WebexSender(account.config);
+            // Rewrite unsupported markdown (pipe-tables) and set the `markdown`
+            // field the same way deliverChunked does for the normal reply path —
+            // otherwise agent-initiated sends through this outbound path render
+            // pipe-table garbage and literal `**` on Webex.
+            const rewritten = typeof text === "string" && text.length > 0
+                ? (0, formatters_1.transformMarkdownForWebex)(text)
+                : text;
             const result = await sender.send({
                 to,
-                content: { text },
+                content: {
+                    text: rewritten,
+                    markdown: (0, formatters_1.looksMarkdown)(rewritten) ? rewritten : undefined,
+                },
                 parentId: replyToId ?? (threadId != null ? String(threadId) : undefined),
             });
             return {
@@ -1731,10 +1741,16 @@ exports.webexPlugin = {
                 throw new Error(`Webex account ${accountId ?? DEFAULT_ACCOUNT_ID} is not configured`);
             }
             const sender = new send_1.WebexSender(account.config);
+            // Same markdown rewrite as sendText — the caption travels through
+            // the same `text`/`markdown` pair, only `files` differs.
+            const rewritten = typeof text === "string" && text.length > 0
+                ? (0, formatters_1.transformMarkdownForWebex)(text)
+                : text;
             const result = await sender.send({
                 to,
                 content: {
-                    text,
+                    text: rewritten,
+                    markdown: (0, formatters_1.looksMarkdown)(rewritten) ? rewritten : undefined,
                     files: mediaUrl ? [mediaUrl] : undefined,
                 },
                 parentId: replyToId ?? (threadId != null ? String(threadId) : undefined),
