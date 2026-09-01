@@ -600,6 +600,50 @@ async function deliverLongReplyAsAttachment(opts) {
     }
 }
 /**
+ * Deliver a `payload.media` value from a dispatcher `deliver` callback —
+ * the file path/URL OpenClaw core extracts from an agent's `MEDIA:<path>`
+ * directive and strips out of the visible reply text. Shared by all
+ * three `deliver` callbacks (main message reply, card-triggered command,
+ * card-action reply) so agent-rendered diagrams/files reach Webex on
+ * every reply path the same way, not just via the message tool /
+ * outbound.sendMedia or the long-reply auto-attach.
+ *
+ * - A local absolute path or file:// URL goes through the same
+ *   resolveAllowedOutboundFile gate as outbound.sendMedia's local-path
+ *   branch, then WebexSender.sendLocalFile — never sent unvalidated.
+ * - An http(s) URL goes through the normal files:[url] flow.
+ * - Sent as its own message with no caption — the text chunk (if any)
+ *   was already delivered separately by the caller before this runs.
+ *
+ * Never throws: a failed image/file send must not take down the text
+ * reply that already went out, or bubble up through `deliver` and
+ * trigger the dispatcher's onError/error-message path for what is, from
+ * the user's perspective, a successful (if image-less) reply.
+ */
+async function deliverMediaPayload(opts) {
+    const { sender, media, target, parentId, accountId, config } = opts;
+    try {
+        if (media.startsWith("/") || media.startsWith("file://")) {
+            const localPath = (0, outbound_file_guard_1.resolveAllowedOutboundFile)(media, config);
+            await sender.sendLocalFile({
+                ...(0, send_1.resolveMessageTarget)(target),
+                filePath: localPath,
+                parentId,
+            });
+        }
+        else {
+            await sender.send({
+                to: target,
+                content: { files: [media] },
+                parentId,
+            });
+        }
+    }
+    catch (err) {
+        console.warn(`[webex:${accountId}] media send failed: ${err instanceof Error ? err.message : err}`);
+    }
+}
+/**
  * Run everything the webhook handler used to do inline — attachment
  * download, ctxPayload build, dispatch with progress reporter — but
  * detached from the HTTP response so Webex can ACK within ~10 s.
@@ -816,6 +860,17 @@ async function processEnvelopeAsync(opts) {
                         }
                         replyDelivered = true;
                     }
+                    if (payload.media) {
+                        await deliverMediaPayload({
+                            sender,
+                            media: payload.media,
+                            target: envelope.conversationId,
+                            parentId: envelope.metadata.parentId,
+                            accountId: account.accountId,
+                            config: account.config,
+                        });
+                        replyDelivered = true;
+                    }
                     await progress?.close();
                 },
                 onError: (err) => {
@@ -895,33 +950,44 @@ async function dispatchCommandFromCard(opts) {
             cfg,
             dispatcherOptions: {
                 deliver: async (payload) => {
-                    if (!payload.text)
-                        return;
-                    const baseCommand = command.split(/\s+/)[0];
-                    if (baseCommand === "/model") {
-                        const handled = await deliverModelPickerCard({
-                            cfg,
-                            sender,
-                            roomId,
-                            parentId,
-                            replyText: payload.text,
-                            accountId: account.accountId,
-                        });
-                        if (handled)
-                            return;
+                    if (payload.text) {
+                        const baseCommand = command.split(/\s+/)[0];
+                        let handledByPicker = false;
+                        if (baseCommand === "/model") {
+                            handledByPicker = await deliverModelPickerCard({
+                                cfg,
+                                sender,
+                                roomId,
+                                parentId,
+                                replyText: payload.text,
+                                accountId: account.accountId,
+                            });
+                        }
+                        if (!handledByPicker) {
+                            await deliverCommandReplyCard({
+                                sender,
+                                roomId,
+                                parentId,
+                                command: baseCommand,
+                                replyText: payload.text,
+                                roomType: "group",
+                                authorId: personId,
+                                authorDisplayName: displayName,
+                                accountId: account.accountId,
+                                config: account.config,
+                            });
+                        }
                     }
-                    await deliverCommandReplyCard({
-                        sender,
-                        roomId,
-                        parentId,
-                        command: baseCommand,
-                        replyText: payload.text,
-                        roomType: "group",
-                        authorId: personId,
-                        authorDisplayName: displayName,
-                        accountId: account.accountId,
-                        config: account.config,
-                    });
+                    if (payload.media) {
+                        await deliverMediaPayload({
+                            sender,
+                            media: payload.media,
+                            target: roomId,
+                            parentId,
+                            accountId: account.accountId,
+                            config: account.config,
+                        });
+                    }
                 },
                 onError: (err) => {
                     console.error(`[webex:${account.accountId}] card command dispatch error: ${err.message}`);
@@ -1470,6 +1536,16 @@ async function processAttachmentActionAsync(opts) {
                             roomType: "group",
                             authorId: action.personId,
                             authorDisplayName: displayName,
+                            accountId: account.accountId,
+                            config: account.config,
+                        });
+                    }
+                    if (payload.media) {
+                        await deliverMediaPayload({
+                            sender,
+                            media: payload.media,
+                            target: action.roomId,
+                            parentId: action.messageId,
                             accountId: account.accountId,
                             config: account.config,
                         });
