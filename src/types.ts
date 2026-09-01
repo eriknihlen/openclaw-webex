@@ -97,9 +97,10 @@ export interface WebexChannelConfig {
    * outbound-file-guard.ts's resolveAllowedOutboundFile). A local path
    * must canonicalize to somewhere inside one of these roots — and pass
    * the extension allowlist and deny-list enforced alongside it — to be
-   * eligible for upload via WebexSender.sendLocalFile. Defaults to
-   * ["/home/claw/.openclaw/workspace/outbound", "/tmp"] when unset.
-   * Deliberately NOT the workspace root itself, which also holds live
+   * eligible for upload via WebexSender.sendLocalFile. When unset,
+   * defaults to <stateDir>/workspace/outbound, <stateDir>/media/outbound
+   * and /tmp, where stateDir is OPENCLAW_STATE_DIR ?? ~/.openclaw (no
+   * hardcoded host paths). Deliberately NOT the workspace root itself, which also holds live
    * secrets (credential files, memory .bak snapshots, etc).
    */
   outboundFileRoots?: string[];

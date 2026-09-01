@@ -75,15 +75,29 @@ const node_url_1 = require("node:url");
  * fs.realpathSync on any path claimed to live under it throws ENOENT,
  * which resolveAllowedOutboundFile treats as a clean denial.
  */
-exports.DEFAULT_OUTBOUND_FILE_ROOTS = [
-    '/home/claw/.openclaw/workspace/outbound',
-    // OpenClaw core's managed outbound-media staging directory: when an agent
-    // emits a MEDIA: directive, core's own normalizer copies the (already
-    // vetted) file here and hands the channel THIS path — not the agent's
-    // original. Confirmed live: renders land as media/outbound/<name>---<uuid>.<ext>.
-    '/home/claw/.openclaw/media/outbound',
-    '/tmp',
-];
+/**
+ * Resolve the OpenClaw state dir portably — OPENCLAW_STATE_DIR when set,
+ * else ~/.openclaw. Matches how channel-plugin.ts resolves config/workspace
+ * paths; never hardcode an absolute user path here (breaks on any other host).
+ */
+function resolveStateDir() {
+    const os = require('node:os');
+    const path = require('node:path');
+    return process.env.OPENCLAW_STATE_DIR ?? path.join(os.homedir(), '.openclaw');
+}
+exports.DEFAULT_OUTBOUND_FILE_ROOTS = (() => {
+    const path = require('node:path');
+    const state = resolveStateDir();
+    return [
+        path.join(state, 'workspace', 'outbound'),
+        // OpenClaw core's managed outbound-media staging directory: when an agent
+        // emits a MEDIA: directive, core's own normalizer copies the (already
+        // vetted) file here and hands the channel THIS path — not the agent's
+        // original. Confirmed live: renders land as media/outbound/<name>---<uuid>.<ext>.
+        path.join(state, 'media', 'outbound'),
+        '/tmp',
+    ];
+})();
 /**
  * Extensions eligible for outbound send, matched case-insensitively
  * against the canonical file's extension. This is the primary control,

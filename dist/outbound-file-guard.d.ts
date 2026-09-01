@@ -27,15 +27,6 @@
  * falls back to sending on rejection — every failure mode throws.
  */
 import type { WebexChannelConfig } from './types';
-/**
- * Default allowed roots when config.outboundFileRoots is unset.
- *
- * workspace/outbound is a purpose-built directory for deliberate
- * outbound artifacts — NOT the workspace root, which also holds live
- * secrets. This code never creates the directory; if it doesn't exist,
- * fs.realpathSync on any path claimed to live under it throws ENOENT,
- * which resolveAllowedOutboundFile treats as a clean denial.
- */
 export declare const DEFAULT_OUTBOUND_FILE_ROOTS: string[];
 /**
  * Canonicalize and validate an agent-supplied outbound file path.

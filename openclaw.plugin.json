@@ -74,11 +74,7 @@
         "items": {
           "type": "string"
         },
-        "description": "Allowed root directories for outbound local file sends (e.g. agent-produced reports or rendered diagrams). A local path must resolve inside one of these roots, and have an attachment-safe extension (images, pdf, txt/md/csv/json/xml/log, zip, svg), to be uploaded to Webex. Not the workspace root itself, which also holds live secrets.",
-        "default": [
-          "/home/claw/.openclaw/workspace/outbound",
-          "/tmp"
-        ]
+        "description": "Allowed root directories for outbound local file sends (e.g. agent-produced reports or rendered diagrams). A local path must resolve inside one of these roots, and have an attachment-safe extension (images, pdf, txt/md/csv/json/xml/log, zip, svg), to be uploaded to Webex. Not the workspace root itself, which also holds live secrets."
       },
       "longReplyAttachThreshold": {
         "type": "number",
@@ -270,11 +266,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Allowed root directories for outbound local file sends (e.g. agent-produced reports or rendered diagrams). A local path must resolve inside one of these roots, and have an attachment-safe extension (images, pdf, txt/md/csv/json/xml/log, zip, svg), to be uploaded to Webex. Not the workspace root itself, which also holds live secrets.",
-            "default": [
-              "/home/claw/.openclaw/workspace/outbound",
-              "/tmp"
-            ]
+            "description": "Allowed root directories for outbound local file sends (e.g. agent-produced reports or rendered diagrams). A local path must resolve inside one of these roots, and have an attachment-safe extension (images, pdf, txt/md/csv/json/xml/log, zip, svg), to be uploaded to Webex. Not the workspace root itself, which also holds live secrets."
           },
           "longReplyAttachThreshold": {
             "type": "number",
