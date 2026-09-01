@@ -914,54 +914,140 @@ async function deliverLongReplyAsAttachment(opts: {
 }
 
 /**
- * Deliver a `payload.media` value from a dispatcher `deliver` callback —
- * the file path/URL OpenClaw core extracts from an agent's `MEDIA:<path>`
- * directive and strips out of the visible reply text. Shared by all
- * three `deliver` callbacks (main message reply, card-triggered command,
- * card-action reply) so agent-rendered diagrams/files reach Webex on
- * every reply path the same way, not just via the message tool /
- * outbound.sendMedia or the long-reply auto-attach.
+ * The workspace root core resolves relative MEDIA: paths against
+ * (openclaw's resolveAgentWorkspaceDir / resolveDefaultAgentWorkspaceDir
+ * in node_modules/openclaw/dist/agent-scope-*.js ultimately bottoms out
+ * at <state dir>/workspace for the default agent, absent a per-agent
+ * override this plugin has no clean way to read from here).
  *
- * - A local absolute path or file:// URL goes through the same
+ * Mirrors the OPENCLAW_STATE_DIR-aware resolution resolveModelAllowList
+ * already uses elsewhere in this file for the state dir itself
+ * (`process.env.OPENCLAW_STATE_DIR ?? path.join(os.homedir(), ".openclaw")`),
+ * then appends "workspace" — the one clean precedent for path
+ * resolution already in this plugin. Falls back to
+ * ~/.openclaw/workspace when OPENCLAW_STATE_DIR is unset, same as the
+ * DEFAULT_OUTBOUND_FILE_ROOTS default in outbound-file-guard.ts.
+ */
+function resolveWorkspaceRootForMedia(): string {
+  // Dynamic require to avoid hoisting path/os to the top of the module
+  // (matches resolveModelAllowList / cleanupTempFiles /
+  // deliverLongReplyAsAttachment elsewhere in this file).
+  const path = require("node:path") as typeof import("node:path");
+  const os = require("node:os") as typeof import("node:os");
+  const stateDir =
+    process.env.OPENCLAW_STATE_DIR ?? path.join(os.homedir(), ".openclaw");
+  return path.join(stateDir, "workspace");
+}
+
+/**
+ * Deliver the media carried on a dispatcher `deliver` callback's
+ * ReplyPayload — the file path(s)/URL(s) OpenClaw core resolves from an
+ * agent's `MEDIA:<path>` directive.
+ *
+ * IMPORTANT — field names verified against the installed openclaw
+ * package (node_modules/openclaw/dist/plugin-sdk/src/auto-reply/
+ * reply-payload.d.ts): ReplyPayload carries `mediaUrl?: string` and
+ * `mediaUrls?: string[]`. There is no `payload.media` field — an
+ * earlier round of this fix read that field and it was always
+ * undefined, so agent-emitted media silently never sent. There is also
+ * no `normalizeMediaPaths` (or similar) hook on ReplyDispatcherOptions/
+ * ReplyDispatcherWithTypingOptions (checked node_modules/openclaw/dist/
+ * plugin-sdk/src/auto-reply/reply/reply-dispatcher.d.ts) — core's own
+ * internal media-path normalizer (createReplyMediaPathNormalizer in
+ * agent-runner.runtime) already runs upstream of our `deliver` callback
+ * for every channel, unconditionally, resolving/validating MEDIA: paths
+ * before we ever see them. By the time `deliver` is called,
+ * payload.mediaUrl/mediaUrls are already the final path/URL — reading
+ * them directly in the existing `deliver` callback (below) *is* the
+ * correct hook; no separate registration point exists or is needed.
+ *
+ * Shared by all three `deliver` callbacks (main message reply,
+ * card-triggered command, card-action reply) so agent-rendered
+ * diagrams/files reach Webex on every reply path, not just via the
+ * message tool / outbound.sendMedia or the long-reply auto-attach.
+ *
+ * - An http(s) URL goes through the normal files:[url] flow, unchanged.
+ * - Everything else is treated as local: an absolute path or file://
+ *   URL is used as-is; a bare relative path (core's upstream normalizer
+ *   may hand us either form depending on version/code path — see
+ *   resolveWorkspaceRootForMedia above) is resolved against the
+ *   workspace root first. Either way it then goes through the same
  *   resolveAllowedOutboundFile gate as outbound.sendMedia's local-path
  *   branch, then WebexSender.sendLocalFile — never sent unvalidated.
- * - An http(s) URL goes through the normal files:[url] flow.
- * - Sent as its own message with no caption — the text chunk (if any)
- *   was already delivered separately by the caller before this runs.
+ * - Each item is sent as its own message with no caption — the text
+ *   chunk (if any) was already delivered separately by the caller
+ *   before this runs.
+ *
+ * Logs one non-swallowed diagnostic line up front (item count + first
+ * item's basename only, never a full path) so a live test shows
+ * unambiguously whether media reached this callback at all — the
+ * previous two rounds' whole debugging problem was silence, with no
+ * signal to tell "core never sent it" apart from "we mishandled it".
  *
  * Never throws: a failed image/file send must not take down the text
  * reply that already went out, or bubble up through `deliver` and
  * trigger the dispatcher's onError/error-message path for what is, from
  * the user's perspective, a successful (if image-less) reply.
  */
-async function deliverMediaPayload(opts: {
+async function deliverReplyMedia(opts: {
   sender: WebexSender;
-  media: string;
+  payload: { mediaUrl?: string; mediaUrls?: string[] };
   target: string;
   parentId: string | undefined;
   accountId: string;
   config: WebexChannelConfig;
 }): Promise<void> {
-  const { sender, media, target, parentId, accountId, config } = opts;
-  try {
-    if (media.startsWith("/") || media.startsWith("file://")) {
-      const localPath = resolveAllowedOutboundFile(media, config);
+  const { sender, payload, target, parentId, accountId, config } = opts;
+  const mediaItems =
+    payload.mediaUrls && payload.mediaUrls.length > 0
+      ? payload.mediaUrls
+      : payload.mediaUrl
+        ? [payload.mediaUrl]
+        : [];
+
+  if (mediaItems.length === 0) return;
+
+  const path = require("node:path") as typeof import("node:path");
+  const firstBasename = mediaItems[0] ? path.basename(mediaItems[0]) : "";
+  console.log(
+    `[webex:${accountId}] reply media: ${mediaItems.length} item(s), first=${firstBasename}`
+  );
+
+  const HTTP_URL_RE = /^https?:\/\//i;
+
+  for (const media of mediaItems) {
+    if (!media) continue;
+    try {
+      if (HTTP_URL_RE.test(media)) {
+        await sender.send({
+          to: target,
+          content: { files: [media] },
+          parentId,
+        });
+        continue;
+      }
+
+      // Local candidate. Absolute paths and file:// URLs pass through
+      // unchanged; a bare relative path (no leading "/" and no scheme)
+      // is resolved against the workspace root before hitting the gate
+      // — resolveAllowedOutboundFile itself rejects relative paths
+      // outright, so this has to happen first.
+      let localCandidate = media;
+      if (!media.startsWith("file://") && !path.isAbsolute(media)) {
+        localCandidate = path.join(resolveWorkspaceRootForMedia(), media);
+      }
+
+      const localPath = resolveAllowedOutboundFile(localCandidate, config);
       await sender.sendLocalFile({
         ...resolveMessageTarget(target),
         filePath: localPath,
         parentId,
       });
-    } else {
-      await sender.send({
-        to: target,
-        content: { files: [media] },
-        parentId,
-      });
+    } catch (err) {
+      console.warn(
+        `[webex:${accountId}] media send failed for "${media}": ${err instanceof Error ? err.message : err}`
+      );
     }
-  } catch (err) {
-    console.warn(
-      `[webex:${accountId}] media send failed: ${err instanceof Error ? err.message : err}`
-    );
   }
 }
 
@@ -1169,7 +1255,7 @@ async function processEnvelopeAsync(opts: {
       ctx: ctxPayload,
       cfg,
       dispatcherOptions: {
-        deliver: async (payload: { text?: string; media?: string }) => {
+        deliver: async (payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] }) => {
           if (payload.text) {
             if (isCommandTurn && commandName === "/model") {
               // /model gets a fully interactive picker; falls through to
@@ -1218,10 +1304,10 @@ async function processEnvelopeAsync(opts: {
             }
             replyDelivered = true;
           }
-          if (payload.media) {
-            await deliverMediaPayload({
+          if (payload.mediaUrl || payload.mediaUrls?.length) {
+            await deliverReplyMedia({
               sender,
-              media: payload.media,
+              payload,
               target: envelope.conversationId,
               parentId: envelope.metadata.parentId,
               accountId: account.accountId,
@@ -1324,7 +1410,7 @@ async function dispatchCommandFromCard(opts: {
       ctx: ctxPayload,
       cfg,
       dispatcherOptions: {
-        deliver: async (payload: { text?: string; media?: string }) => {
+        deliver: async (payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] }) => {
           if (payload.text) {
             const baseCommand = command.split(/\s+/)[0];
             let handledByPicker = false;
@@ -1353,10 +1439,10 @@ async function dispatchCommandFromCard(opts: {
               });
             }
           }
-          if (payload.media) {
-            await deliverMediaPayload({
+          if (payload.mediaUrl || payload.mediaUrls?.length) {
+            await deliverReplyMedia({
               sender,
-              media: payload.media,
+              payload,
               target: roomId,
               parentId,
               accountId: account.accountId,
@@ -1975,7 +2061,7 @@ async function processAttachmentActionAsync(opts: {
       ctx: ctxPayload,
       cfg,
       dispatcherOptions: {
-        deliver: async (payload: { text?: string; media?: string }) => {
+        deliver: async (payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] }) => {
           if (payload.text) {
             await deliverChunked({
               sender,
@@ -1989,10 +2075,10 @@ async function processAttachmentActionAsync(opts: {
               config: account.config,
             });
           }
-          if (payload.media) {
-            await deliverMediaPayload({
+          if (payload.mediaUrl || payload.mediaUrls?.length) {
+            await deliverReplyMedia({
               sender,
-              media: payload.media,
+              payload,
               target: action.roomId,
               parentId: action.messageId,
               accountId: account.accountId,
