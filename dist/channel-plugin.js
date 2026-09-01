@@ -496,7 +496,7 @@ const DEFAULT_ACCOUNT_ID = "default";
  *
  */
 async function deliverChunked(opts) {
-    const { sender, roomId, parentId, replyText, roomType, authorId, authorDisplayName, accountId, config, } = opts;
+    const { sender, roomId, parentId, replyText, roomType, authorId, authorDisplayName, accountId, config, reuseMessageId, } = opts;
     const mention = roomType === "group" && authorId
         ? (0, formatters_1.mentionMarkdown)(authorId, authorDisplayName)
         : "";
@@ -524,8 +524,18 @@ async function deliverChunked(opts) {
             config,
             accountId,
         });
-        if (attached)
+        if (attached) {
+            // The attachment path posts a fresh message via multipart upload
+            // — there's no PUT-editing a placeholder into a file attachment,
+            // so a claimed placeholder can't be reused here. Best-effort
+            // clean it up so it doesn't linger next to the attachment.
+            if (reuseMessageId) {
+                await sender.deleteMessage(reuseMessageId).catch((err) => {
+                    console.warn(`[webex:${accountId}] failed to clean up claimed placeholder ${reuseMessageId}: ${err instanceof Error ? err.message : err}`);
+                });
+            }
             return;
+        }
     }
     // Thread 2..N replies under the first Webex message we post, so the
     // chunks read as one logical response rather than scattered messages.
@@ -538,6 +548,28 @@ async function deliverChunked(opts) {
             : chunk;
         const markdownBody = isFirst && mention ? `${mention} ${chunk}` : chunk;
         const markdown = shouldUseMarkdown ? markdownBody : undefined;
+        // First chunk: if we were handed a claimed placeholder, try to edit
+        // it in place into the answer instead of posting a fresh message —
+        // this is what collapses "Working on it…" + answer into one
+        // message. `markdown ?? text` mirrors the fallback sender.send()
+        // gets via buildMessageRequest, since updateMessage has no such
+        // fallback of its own.
+        if (isFirst && reuseMessageId) {
+            try {
+                await sender.updateMessage(reuseMessageId, roomId, text, markdown ?? text);
+                firstMessageId = reuseMessageId;
+                continue;
+            }
+            catch (err) {
+                console.warn(`[webex:${accountId}] placeholder reuse edit failed, falling back to a fresh post: ${err instanceof Error ? err.message : err}`);
+                // Best-effort: the placeholder is now orphaned (edit failed —
+                // deleted, edit cap, rate limit, …); remove it so it doesn't
+                // sit next to the fresh reply posted below. Never let a failed
+                // cleanup block delivery of the actual answer.
+                await sender.deleteMessage(reuseMessageId).catch(() => { });
+                // Fall through to the normal post path for chunk 0.
+            }
+        }
         try {
             const sent = await sender.send({
                 to: roomId,
@@ -844,6 +876,13 @@ async function processEnvelopeAsync(opts) {
         cleanupTempFiles(downloaded, account.accountId);
         return;
     }
+    // INVARIANT: this ONE sender instance must be shared by both the progress
+    // reporter (below) and the reply's deliverChunked. Their PUTs serialize
+    // through the same rate-limit chain (FIFO), which is what guarantees a
+    // trailing in-flight progress edit lands BEFORE the reply's edit-in-place —
+    // so claimForReply() can hand off the placeholder without draining the
+    // flush. Do NOT give the reply path a separate WebexSender, or a late
+    // progress PUT could clobber the answer.
     const sender = new send_1.WebexSender(account.config);
     const verbosity = account.config.progressVerbosity ?? "detailed";
     // Slash-command turns (/status, /help, …) are answered synchronously by
@@ -959,6 +998,16 @@ async function processEnvelopeAsync(opts) {
                             const replyText = elapsedLabel
                                 ? `⏱ Worked for ${elapsedLabel}\n\n${payload.text}`
                                 : payload.text;
+                            // Hand the "Working on it…" placeholder off to
+                            // deliverChunked so it can edit it into the answer instead
+                            // of leaving it behind next to a fresh message — one
+                            // message instead of two. claimForReply() returns
+                            // undefined (and best-effort cleans up any stale
+                            // placeholder itself) when reuse isn't safe — fast turns
+                            // that never posted a placeholder, or one that already
+                            // overflowed its edit budget — in which case this falls
+                            // through to the prior post-fresh behavior.
+                            const reuseMessageId = progress?.claimForReply();
                             await deliverChunked({
                                 sender,
                                 roomId: envelope.conversationId,
@@ -969,6 +1018,7 @@ async function processEnvelopeAsync(opts) {
                                 authorDisplayName: envelope.author.displayName,
                                 accountId: account.accountId,
                                 config: account.config,
+                                reuseMessageId,
                             });
                         }
                         replyDelivered = true;

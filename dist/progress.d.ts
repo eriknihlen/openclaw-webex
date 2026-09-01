@@ -21,7 +21,14 @@
  *   editableLimit subsequent updates are PUT /messages/{id} refreshes
  *   on that same message. After the limit, we switch to append so the
  *   Webex edit cap can't be hit.
- * - close() stops accepting updates. It does NOT delete any messages.
+ * - close() stops accepting updates. It does NOT delete any messages —
+ *   any leftover placeholder is the caller's problem (see
+ *   claimForReply() below, which the reply path uses instead of close()
+ *   to repurpose or clean up the placeholder rather than abandon it).
+ * - claimForReply(): the reply-delivery path uses this instead of
+ *   close() when it wants to turn the placeholder into the final answer
+ *   (edit-in-place) rather than post a separate message. See its own
+ *   doc comment for the contract.
  */
 import type { WebexSender } from "./send";
 export interface ProgressReporterOptions {
@@ -65,5 +72,29 @@ export interface ProgressReporter {
     update(text: string, markdown?: string): void;
     /** Stop accepting further updates. Does not delete anything. */
     close(): Promise<void>;
+    /**
+     * Hand off the placeholder message to the reply path so it can be
+     * turned into the final answer instead of leaving it behind. Returns
+     * the placeholder's messageId ONLY when reuse is actually safe:
+     *   (a) a message has actually been posted (a messageId exists), and
+     *   (b) at least one more PUT edit is still safe under the Webex
+     *       10-edit cap — i.e. the reporter hasn't already spent its
+     *       edits and flipped to append mode (same editableCount <
+     *       editableLimit check `flush()` itself uses).
+     * Returns undefined otherwise — including when no message was ever
+     * posted at all (a fast turn that never got past the initial
+     * debounce, or progress reporting disabled).
+     *
+     * Calling this ALWAYS closes the reporter, whether or not it returns
+     * an id: no further update()/flush() may touch the placeholder after
+     * a claim attempt, successful or not, so the reply path can safely
+     * take over (or clean up) without the reporter fighting it. When the
+     * placeholder exists but isn't claimable (overflowed to append mode,
+     * or a post is still in flight and lands after the call), this makes
+     * a best-effort attempt to delete it itself so it doesn't linger next
+     * to the fresh reply — callers don't need to do that cleanup for the
+     * "claim failed but a message exists" case themselves.
+     */
+    claimForReply(): string | undefined;
 }
 export declare function createProgressReporter(opts: ProgressReporterOptions): ProgressReporter;

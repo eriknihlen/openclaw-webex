@@ -21,7 +21,14 @@
  *   editableLimit subsequent updates are PUT /messages/{id} refreshes
  *   on that same message. After the limit, we switch to append so the
  *   Webex edit cap can't be hit.
- * - close() stops accepting updates. It does NOT delete any messages.
+ * - close() stops accepting updates. It does NOT delete any messages —
+ *   any leftover placeholder is the caller's problem (see
+ *   claimForReply() below, which the reply path uses instead of close()
+ *   to repurpose or clean up the placeholder rather than abandon it).
+ * - claimForReply(): the reply-delivery path uses this instead of
+ *   close() when it wants to turn the placeholder into the final answer
+ *   (edit-in-place) rather than post a separate message. See its own
+ *   doc comment for the contract.
  */
 
 import type { WebexSender } from "./send";
@@ -68,6 +75,30 @@ export interface ProgressReporter {
   update(text: string, markdown?: string): void;
   /** Stop accepting further updates. Does not delete anything. */
   close(): Promise<void>;
+  /**
+   * Hand off the placeholder message to the reply path so it can be
+   * turned into the final answer instead of leaving it behind. Returns
+   * the placeholder's messageId ONLY when reuse is actually safe:
+   *   (a) a message has actually been posted (a messageId exists), and
+   *   (b) at least one more PUT edit is still safe under the Webex
+   *       10-edit cap — i.e. the reporter hasn't already spent its
+   *       edits and flipped to append mode (same editableCount <
+   *       editableLimit check `flush()` itself uses).
+   * Returns undefined otherwise — including when no message was ever
+   * posted at all (a fast turn that never got past the initial
+   * debounce, or progress reporting disabled).
+   *
+   * Calling this ALWAYS closes the reporter, whether or not it returns
+   * an id: no further update()/flush() may touch the placeholder after
+   * a claim attempt, successful or not, so the reply path can safely
+   * take over (or clean up) without the reporter fighting it. When the
+   * placeholder exists but isn't claimable (overflowed to append mode,
+   * or a post is still in flight and lands after the call), this makes
+   * a best-effort attempt to delete it itself so it doesn't linger next
+   * to the fresh reply — callers don't need to do that cleanup for the
+   * "claim failed but a message exists" case themselves.
+   */
+  claimForReply(): string | undefined;
 }
 
 const DEFAULT_INITIAL_DEBOUNCE_MS = 800;
@@ -95,6 +126,13 @@ export function createProgressReporter(
   // performed; when it reaches editableLimit we flip to append mode.
   let firstMessageId: string | undefined;
   let editableCount = 0;
+  // Tracks the currently in-flight flush() call (if any) so
+  // claimForReply() can chain a cleanup onto it: if a claim attempt
+  // lands while the very first POST is still in flight, firstMessageId
+  // isn't set yet at claim time, but it may become set moments later
+  // when that POST resolves. Without this, that message would post
+  // after the hand-off and never get cleaned up.
+  let inFlightFlush: Promise<void> | undefined;
 
   const warn = (err: unknown) => {
     try {
@@ -147,9 +185,16 @@ export function createProgressReporter(
       flushing = false;
       // Drain any update that arrived during the in-flight send.
       if (!closed && pendingText && pendingText !== lastPostedText) {
-        void flush();
+        triggerFlush();
       }
     }
+  };
+
+  // All call sites that kick off a flush go through this so
+  // inFlightFlush always reflects the most recent one, for
+  // claimForReply()'s race-closing chain above.
+  const triggerFlush = () => {
+    inFlightFlush = flush();
   };
 
   const clearDebounce = () => {
@@ -176,12 +221,12 @@ export function createProgressReporter(
         debounceTimer = setTimeout(() => {
           debouncePending = false;
           debounceTimer = undefined;
-          void flush();
+          triggerFlush();
         }, initialDebounceMs);
         return;
       }
 
-      void flush();
+      triggerFlush();
     },
 
     async close() {
@@ -190,8 +235,45 @@ export function createProgressReporter(
       while (flushing) {
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
-      // Deliberately no deleteMessage calls — progress history stays
-      // in the conversation as a permanent trail of what happened.
+      // Deliberately no deleteMessage calls here — a plain close() (no
+      // reply to hand the placeholder off to, e.g. an error path) leaves
+      // progress history in the conversation as a trail of what
+      // happened. The reply path uses claimForReply() instead, which
+      // does take responsibility for repurposing or deleting the
+      // placeholder — see its doc comment.
+    },
+
+    claimForReply() {
+      if (closed) return undefined;
+      closed = true;
+      clearDebounce();
+
+      const canClaim =
+        editableLimit > 0 &&
+        firstMessageId !== undefined &&
+        editableCount < editableLimit;
+      if (canClaim) {
+        return firstMessageId;
+      }
+
+      // Not claimable right now. Two cases:
+      //  - A placeholder exists but is stuck in append mode (spent its
+      //    edits) — it's stale, best-effort delete it now.
+      //  - Nothing has posted yet. If a flush is currently in flight
+      //    (the first POST is on the wire), it may still land a
+      //    messageId moments after we return here with undefined —
+      //    chain onto it so that late-arriving placeholder gets cleaned
+      //    up too, instead of lingering next to the fresh reply.
+      if (flushing && inFlightFlush) {
+        void inFlightFlush.then(() => {
+          if (firstMessageId) {
+            sender.deleteMessage(firstMessageId).catch((err) => warn(err));
+          }
+        }).catch(() => {});
+      } else if (firstMessageId) {
+        void sender.deleteMessage(firstMessageId).catch((err) => warn(err));
+      }
+      return undefined;
     },
   };
 }
