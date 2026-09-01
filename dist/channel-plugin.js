@@ -995,6 +995,260 @@ async function processAttachmentActionAsync(opts) {
             return;
         }
     }
+    // AIOps approval cards: the AIOps dashboard (a separate service) posts
+    // Adaptive Cards whose Action.Submit data carries
+    // `{intent: "aiops-approval", evalId, decision}` plus an optional
+    // user-typed `notes` input. These submissions are handled
+    // deterministically here — no agent dispatch — by calling the
+    // dashboard's approve/reject API directly and rewriting the card as
+    // the audit record. This branch owns its card rewrite exclusively: it
+    // always returns before falling through to the commandFromCard or
+    // generic-submission branches below, so neither of those can also
+    // rewrite the same card for an aiops-approval action.
+    if (action.inputs.intent === "aiops-approval") {
+        const rawEvalId = action.inputs.evalId;
+        const evalId = typeof rawEvalId === "string" ? rawEvalId : "";
+        const decision = action.inputs.decision;
+        // Reject an all-dots value (".", "..", "...") in addition to the
+        // general charset check — closes a path-normalization primitive the
+        // dashboard's URL-based routing would otherwise be vulnerable to.
+        const evalIdValid = /^[A-Za-z0-9_.:-]{1,64}$/.test(evalId) && !/^\.+$/.test(evalId);
+        const decisionValid = decision === "approve" || decision === "reject";
+        if (!evalIdValid || !decisionValid) {
+            console.warn(`[webex:${account.accountId}] dropped aiops-approval action ${action.id}: invalid evalId (${JSON.stringify(rawEvalId)}) or decision (${JSON.stringify(decision)})`);
+            return;
+        }
+        // Resolve actor identity: prefer the submitter's first email, then
+        // their display name (already resolved above), then the raw personId.
+        let actor = displayName ?? action.personId;
+        try {
+            const people = getPeopleCache(account.accountId, account.config.apiBaseUrl);
+            const emails = await people.getEmails(action.personId, account.config.token);
+            if (emails && emails.length > 0 && emails[0]) {
+                actor = emails[0];
+            }
+        }
+        catch {
+            // fall back to the displayName/personId already assigned above
+        }
+        const notes = typeof action.inputs.notes === "string" && action.inputs.notes.length > 0
+            ? action.inputs.notes.slice(0, 1000)
+            : undefined;
+        const approvalBase = typeof account.config.aiopsApprovalUrl === "string" &&
+            account.config.aiopsApprovalUrl.length > 0
+            ? account.config.aiopsApprovalUrl
+            : "http://127.0.0.1:8765/api/v1";
+        const url = `${approvalBase.replace(/\/+$/, "")}/evaluations/${encodeURIComponent(evalId)}/${decision}`;
+        // Shared-secret auth, opt-in via config. Sent only as a request
+        // header — never logged, never echoed into any card or chat message.
+        const requestHeaders = {
+            "Content-Type": "application/json",
+        };
+        if (typeof account.config.aiopsApprovalSecret === "string" &&
+            account.config.aiopsApprovalSecret.length > 0) {
+            requestHeaders["X-AIOps-Approval-Secret"] = account.config.aiopsApprovalSecret;
+        }
+        let ok = false;
+        let httpStatus;
+        let responseBody;
+        let networkError = false;
+        try {
+            const res = await fetch(url, {
+                method: "POST",
+                headers: requestHeaders,
+                // cardMessageId binds this decision to the specific card that was
+                // clicked — the dashboard enforces it matches the evaluation's
+                // approval_card_message_id, so a crafted submission naming an
+                // arbitrary evalId can't be approved from an unrelated card.
+                body: JSON.stringify({
+                    user: actor,
+                    notes,
+                    cardMessageId: action.messageId,
+                }),
+                signal: AbortSignal.timeout(10_000),
+            });
+            httpStatus = res.status;
+            ok = res.ok;
+            // Best-effort, size-capped body parse on every response (not just
+            // 2xx) — the success path uses it for the "upgrade" field, and
+            // non-2xx branches below (409/404/422/401/403) may want detail
+            // fields (e.g. `detail.code`) later without another round-trip.
+            try {
+                const rawText = await res.text();
+                if (rawText && rawText.length <= 10_000) {
+                    responseBody = JSON.parse(rawText);
+                }
+            }
+            catch {
+                responseBody = undefined;
+            }
+        }
+        catch (err) {
+            networkError = true;
+            console.warn(`[webex:${account.accountId}] aiops-approval request errored for eval ${evalId} (decision=${decision}, actor=${actor}): ${err instanceof Error ? err.message : err}`);
+        }
+        const ts = formatUtcTimestamp(new Date());
+        const safeActor = (0, formatters_1.escapeMarkdown)(truncate(actor, 80));
+        if (ok) {
+            const rewriteSummary = decision === "approve"
+                ? `✅ Approved by ${safeActor} · ${ts} UTC`
+                : `⛔ Rejected by ${safeActor} · ${ts} UTC`;
+            if (sourceMessage) {
+                void rewriteSourceCardAsUsed({
+                    account,
+                    action,
+                    message: sourceMessage,
+                    summary: rewriteSummary,
+                    sender,
+                });
+            }
+            const responseFields = responseBody && typeof responseBody === "object"
+                ? responseBody
+                : undefined;
+            let confirmPlain;
+            if (decision === "approve") {
+                // The dashboard only enqueues the background upgrade task at
+                // this point — it may still fail downstream — so this can't
+                // claim the fixed "upgrade queued" text alongside a possibly
+                // different response value (previously self-contradictory,
+                // e.g. "upgrade queued (upgrade: dispatched)"). Use the
+                // response's own word for what happened to the upgrade, else
+                // fall back to "queued".
+                const upgradeValue = typeof responseFields?.upgrade === "string" ? responseFields.upgrade : undefined;
+                confirmPlain = `Evaluation ${evalId} approved by ${actor} — upgrade ${upgradeValue ?? "queued"}`;
+            }
+            else {
+                // Reject confirmation is unchanged: surface a couple of response
+                // fields if the dashboard trivially provided them, without
+                // depending on any particular shape.
+                const extras = [];
+                if (typeof responseFields?.status === "string")
+                    extras.push(`status: ${responseFields.status}`);
+                if (typeof responseFields?.upgrade === "string")
+                    extras.push(`upgrade: ${responseFields.upgrade}`);
+                const extraSuffix = extras.length > 0 ? ` (${extras.join(", ")})` : "";
+                confirmPlain = `Evaluation ${evalId} rejected by ${actor}${extraSuffix}`;
+            }
+            const icon = decision === "approve" ? "✅" : "⛔";
+            try {
+                await sender.send({
+                    to: action.roomId,
+                    content: {
+                        text: `${icon} ${confirmPlain}`,
+                        markdown: `${icon} ${(0, formatters_1.escapeMarkdown)(confirmPlain)}`,
+                    },
+                    parentId: action.messageId,
+                });
+            }
+            catch (err) {
+                console.warn(`[webex:${account.accountId}] aiops-approval confirmation post failed for eval ${evalId}: ${err instanceof Error ? err.message : err}`);
+            }
+        }
+        else if (httpStatus === 409 || httpStatus === 404) {
+            // Terminal outcomes — retrying can never succeed (the evaluation is
+            // already decided, or no longer exists), so the card is deadened
+            // just like a successful decision instead of staying live for an
+            // endless "please try again" loop.
+            const isConflict = httpStatus === 409;
+            console.warn(`[webex:${account.accountId}] aiops-approval terminal ${httpStatus} for eval ${evalId} (decision=${decision}, actor=${actor}): ${isConflict ? "already decided" : "not found"}`);
+            const rewriteSummary = isConflict
+                ? `⚠️ Already decided · ${ts} UTC`
+                : `⚠️ Evaluation not found · ${ts} UTC`;
+            if (sourceMessage) {
+                void rewriteSourceCardAsUsed({
+                    account,
+                    action,
+                    message: sourceMessage,
+                    summary: rewriteSummary,
+                    sender,
+                });
+            }
+            const noteText = isConflict
+                ? `Evaluation ${evalId} was already decided — no action taken.`
+                : `Evaluation ${evalId} not found — no action taken.`;
+            try {
+                await sender.send({
+                    to: action.roomId,
+                    content: {
+                        text: `⚠️ ${noteText}`,
+                        markdown: `⚠️ ${(0, formatters_1.escapeMarkdown)(noteText)}`,
+                    },
+                    parentId: action.messageId,
+                });
+            }
+            catch (err) {
+                console.warn(`[webex:${account.accountId}] aiops-approval terminal notice post failed for eval ${evalId}: ${err instanceof Error ? err.message : err}`);
+            }
+        }
+        else if (httpStatus === 422) {
+            // Non-terminal: the dashboard rejected this decision because the
+            // clicked card isn't (or is no longer) the card bound to this
+            // evaluation server-side (detail.code "card_not_bound" — a
+            // duplicate card, or one that predates the approval system). No
+            // decision was recorded, so unlike 409/404 the card must stay
+            // live rather than be deadened; the click itself can't be retried
+            // into success, though, so point the user at the dashboard API.
+            console.warn(`[webex:${account.accountId}] aiops-approval card not bound to eval ${evalId} (decision=${decision}, actor=${actor}, httpStatus=422)`);
+            const noteText = `This card is not bound to evaluation ${evalId} (it may predate the approval system or be a duplicate) — decide via the dashboard API instead.`;
+            try {
+                await sender.send({
+                    to: action.roomId,
+                    content: {
+                        text: `⚠️ ${noteText}`,
+                        markdown: `⚠️ ${(0, formatters_1.escapeMarkdown)(noteText)}`,
+                    },
+                    parentId: action.messageId,
+                });
+            }
+            catch (err) {
+                console.warn(`[webex:${account.accountId}] aiops-approval card-not-bound notice post failed for eval ${evalId}: ${err instanceof Error ? err.message : err}`);
+            }
+        }
+        else if (httpStatus === 401 || httpStatus === 403) {
+            // Non-terminal: an auth misconfiguration between the bot and the
+            // dashboard (401 today, 403 after the dashboard's auth-failure
+            // status change — handle both). Retrying the same click can't fix
+            // this, so no retry framing; the card stays live since no
+            // decision was actually recorded, and an operator needs to fix
+            // the shared secret out-of-band.
+            console.warn(`[webex:${account.accountId}] aiops-approval auth failure (HTTP ${httpStatus}) for eval ${evalId} (decision=${decision}, actor=${actor})`);
+            const noteText = `Approval authentication is misconfigured between the bot and the dashboard — no decision was recorded. Contact ops.`;
+            try {
+                await sender.send({
+                    to: action.roomId,
+                    content: {
+                        text: `⚠️ ${noteText}`,
+                        markdown: `⚠️ ${(0, formatters_1.escapeMarkdown)(noteText)}`,
+                    },
+                    parentId: action.messageId,
+                });
+            }
+            catch (err) {
+                console.warn(`[webex:${account.accountId}] aiops-approval auth-failure notice post failed for eval ${evalId}: ${err instanceof Error ? err.message : err}`);
+            }
+        }
+        else {
+            // Retryable failure path — network errors/timeouts and any other
+            // non-2xx (notably 5xx) never rewrite the card, so the click stays
+            // retryable.
+            console.warn(`[webex:${account.accountId}] aiops-approval NOT recorded for eval ${evalId} (decision=${decision}, actor=${actor}, httpStatus=${httpStatus ?? "n/a"}${networkError ? ", network error" : ""})`);
+            const failPlain = `Could not record ${decision === "approve" ? "approval" : "rejection"} for evaluation ${evalId}${httpStatus ? ` (HTTP ${httpStatus})` : " (request failed)"}. Please try again.`;
+            try {
+                await sender.send({
+                    to: action.roomId,
+                    content: {
+                        text: `⚠️ ${failPlain}`,
+                        markdown: `⚠️ ${(0, formatters_1.escapeMarkdown)(failPlain)}`,
+                    },
+                    parentId: action.messageId,
+                });
+            }
+            catch (err) {
+                console.warn(`[webex:${account.accountId}] aiops-approval failure notice post failed for eval ${evalId}: ${err instanceof Error ? err.message : err}`);
+            }
+        }
+        return;
+    }
     // Tap-to-run command buttons: a card Action.Submit carrying
     // `__openclawCommand` executes that slash command as if the submitter
     // had typed it. Authorization for this was already checked above.
@@ -1252,6 +1506,8 @@ function resolveWebexAccount(opts) {
                 agent: namedAccount.agent ?? section.agent,
                 progressStreamReasoning: namedAccount.progressStreamReasoning ??
                     section.progressStreamReasoning,
+                aiopsApprovalUrl: namedAccount.aiopsApprovalUrl ?? section.aiopsApprovalUrl,
+                aiopsApprovalSecret: namedAccount.aiopsApprovalSecret ?? section.aiopsApprovalSecret,
             },
         };
     }
@@ -1279,6 +1535,8 @@ function resolveWebexAccount(opts) {
                 //agent binding for the default account.
                 agent: section.agent,
                 progressStreamReasoning: section.progressStreamReasoning,
+                aiopsApprovalUrl: section.aiopsApprovalUrl,
+                aiopsApprovalSecret: section.aiopsApprovalSecret,
             },
         };
     }

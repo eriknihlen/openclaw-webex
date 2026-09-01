@@ -60,6 +60,15 @@
         "description": "When true, stream the agent's reasoning text live into the Webex progress message instead of the static \"\ud83d\udcad Thinking\u2026\" label. Opt-in because raw reasoning occasionally contains internal deliberation or echoed context users didn't intend to see; redaction is best-effort.",
         "default": false
       },
+      "aiopsApprovalUrl": {
+        "type": "string",
+        "description": "Base URL for the AIOps dashboard's approval API, used to record approve/reject decisions submitted from AIOps approval cards.",
+        "default": "http://127.0.0.1:8765/api/v1"
+      },
+      "aiopsApprovalSecret": {
+        "type": "string",
+        "description": "Optional shared secret sent as the X-AIOps-Approval-Secret header on every approval/rejection request to the AIOps dashboard."
+      },
       "progressVerbosity": {
         "type": "string",
         "enum": [
@@ -130,6 +139,12 @@
             },
             "progressStreamReasoning": {
               "type": "boolean"
+            },
+            "aiopsApprovalUrl": {
+              "type": "string"
+            },
+            "aiopsApprovalSecret": {
+              "type": "string"
             },
             "showProgressPlaceholder": {
               "type": "boolean"
@@ -218,6 +233,13 @@
             "type": "boolean",
             "default": false
           },
+          "aiopsApprovalUrl": {
+            "type": "string",
+            "default": "http://127.0.0.1:8765/api/v1"
+          },
+          "aiopsApprovalSecret": {
+            "type": "string"
+          },
           "showProgressPlaceholder": {
             "type": "boolean"
           },
@@ -278,6 +300,12 @@
                 "progressStreamReasoning": {
                   "type": "boolean"
                 },
+                "aiopsApprovalUrl": {
+                  "type": "string"
+                },
+                "aiopsApprovalSecret": {
+                  "type": "string"
+                },
                 "showProgressPlaceholder": {
                   "type": "boolean"
                 },
@@ -333,6 +361,11 @@
         },
         "progressStreamReasoning": {
           "label": "Stream reasoning text"
+        },
+        "aiopsApprovalSecret": {
+          "label": "AIOps Approval Secret",
+          "sensitive": true,
+          "placeholder": "Shared secret sent as X-AIOps-Approval-Secret"
         }
       },
       "commands": {
@@ -397,6 +430,11 @@
     },
     "progressStreamReasoning": {
       "label": "Stream reasoning text"
+    },
+    "aiopsApprovalSecret": {
+      "label": "AIOps Approval Secret",
+      "sensitive": true,
+      "placeholder": "Shared secret sent as X-AIOps-Approval-Secret"
     }
   }
 }

@@ -76,6 +76,21 @@ export interface WebexChannelConfig {
    * in chat — redaction is best-effort, not comprehensive.
    */
   progressStreamReasoning?: boolean;
+
+  /**
+   * Base URL for the AIOps dashboard's approval API, used to record
+   * approve/reject decisions submitted from AIOps approval cards
+   * (Action.Submit data `{intent: "aiops-approval", evalId, decision}`).
+   * Defaults to "http://127.0.0.1:8765/api/v1".
+   */
+  aiopsApprovalUrl?: string;
+
+  /**
+   * Optional shared secret sent as the `X-AIOps-Approval-Secret` header
+   * on every approval/rejection POST to the AIOps dashboard. Never
+   * logged. Unset means no secret header is sent.
+   */
+  aiopsApprovalSecret?: string;
 }
 
 // ============================================================================
