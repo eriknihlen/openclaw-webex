@@ -2032,6 +2032,311 @@ async function processAttachmentActionAsync(opts: {
     return;
   }
 
+  // AIOps CVE-evaluate cards: the daily CVE scan (eval_engine/cve_scan.py)
+  // posts one grouped Adaptive Card per product/version carrying an
+  // "Evaluate upgrade" button whose Action.Submit data is
+  // `{intent: "aiops-cve-evaluate", components: [ids], product, current}`.
+  // This used to fall through to the generic agent-dispatch path below;
+  // handled deterministically here instead, mirroring the aiops-approval
+  // branch above: POST straight to the dashboard's evaluate-components API
+  // and rewrite the card as the audit record — no agent dispatch, ever, for
+  // this intent. Like aiops-approval, this branch owns its card rewrite
+  // exclusively and always returns before falling through.
+  if (action.inputs.intent === "aiops-cve-evaluate") {
+    const rawComponents = action.inputs.components;
+    const componentIdRe = /^[A-Za-z0-9._-]{1,64}$/;
+    const components =
+      Array.isArray(rawComponents) &&
+      rawComponents.length >= 1 &&
+      rawComponents.length <= 20 &&
+      rawComponents.every((c) => typeof c === "string" && componentIdRe.test(c))
+        ? (rawComponents as string[])
+        : undefined;
+
+    const rawCurrent = action.inputs.current;
+    const rawProduct = action.inputs.product;
+    // Optional in principle (the card always sets both today), but if
+    // present they must be strings — cap the lengths actually sent
+    // upstream rather than rejecting on a merely-long value.
+    const currentValid = rawCurrent === undefined || typeof rawCurrent === "string";
+    const productValid = rawProduct === undefined || typeof rawProduct === "string";
+
+    if (!components || !currentValid || !productValid) {
+      const reason = !components
+        ? "malformed or missing components list"
+        : !currentValid
+          ? "malformed current field"
+          : "malformed product field";
+      console.warn(
+        `[webex:${account.accountId}] dropped aiops-cve-evaluate action ${action.id}: invalid components (${JSON.stringify(rawComponents)}), current (${JSON.stringify(rawCurrent)}), or product (${JSON.stringify(rawProduct)})`
+      );
+      // Card payload was malformed — nothing was queued, so the card stays
+      // live, but a silent drop leaves the room with no signal that the
+      // tap did nothing. Post a short notice so the operator knows to
+      // regenerate the card rather than assume it's still pending.
+      const dropText = `Couldn't start evaluation: malformed card payload (${reason}). Ask the operator to regenerate the card.`;
+      try {
+        await sender.send({
+          to: action.roomId,
+          content: {
+            text: `⚠️ ${dropText}`,
+            markdown: `⚠️ ${escapeMarkdown(dropText)}`,
+          },
+          parentId: action.messageId,
+        });
+      } catch (err) {
+        console.warn(
+          `[webex:${account.accountId}] aiops-cve-evaluate malformed-payload notice post failed: ${err instanceof Error ? err.message : err}`
+        );
+      }
+      return;
+    }
+    const current = typeof rawCurrent === "string" ? truncate(rawCurrent, 100) : "";
+    const product = typeof rawProduct === "string" ? truncate(rawProduct, 200) : "";
+
+    // Resolve actor identity: prefer the submitter's first email, then
+    // their display name (already resolved above), then the raw personId.
+    // Identical to the aiops-approval branch above.
+    let actor = displayName ?? action.personId;
+    try {
+      const people = getPeopleCache(account.accountId, account.config.apiBaseUrl);
+      const emails = await people.getEmails(action.personId, account.config.token);
+      if (emails && emails.length > 0 && emails[0]) {
+        actor = emails[0];
+      }
+    } catch {
+      // fall back to the displayName/personId already assigned above
+    }
+
+    const approvalBase =
+      typeof account.config.aiopsApprovalUrl === "string" &&
+      account.config.aiopsApprovalUrl.length > 0
+        ? account.config.aiopsApprovalUrl
+        : "http://127.0.0.1:8765/api/v1";
+    const url = `${approvalBase.replace(/\/+$/, "")}/actions/evaluate-components`;
+
+    // Shared-secret auth, opt-in via config — same header as aiops-approval.
+    // Sent only as a request header — never logged, never echoed into any
+    // card or chat message.
+    const requestHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (
+      typeof account.config.aiopsApprovalSecret === "string" &&
+      account.config.aiopsApprovalSecret.length > 0
+    ) {
+      requestHeaders["X-AIOps-Approval-Secret"] = account.config.aiopsApprovalSecret;
+    }
+
+    let ok = false;
+    let httpStatus: number | undefined;
+    let responseBody: unknown;
+    let networkError = false;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: requestHeaders,
+        body: JSON.stringify({ components, product, current, actor }),
+        // A touch longer than aiops-approval's 10s: the endpoint does a
+        // synchronous DB lookup per requested component (up to 20) before
+        // responding, though the eval_engine subprocess work itself is
+        // dispatched in the background on the dashboard side.
+        signal: AbortSignal.timeout(12_000),
+      });
+      httpStatus = res.status;
+      ok = res.ok;
+      // Best-effort, size-capped body parse — mirrors aiops-approval.
+      try {
+        const rawText = await res.text();
+        if (rawText && rawText.length <= 10_000) {
+          responseBody = JSON.parse(rawText);
+        }
+      } catch {
+        responseBody = undefined;
+      }
+    } catch (err) {
+      networkError = true;
+      console.warn(
+        `[webex:${account.accountId}] aiops-cve-evaluate request errored for components=${components.join(",")} (actor=${actor}): ${err instanceof Error ? err.message : err}`
+      );
+    }
+
+    const ts = formatUtcTimestamp(new Date());
+    const safeActor = escapeMarkdown(truncate(actor, 80));
+
+    if (ok) {
+      const responseFields =
+        responseBody && typeof responseBody === "object"
+          ? (responseBody as Record<string, unknown>)
+          : undefined;
+      // M1: a 2xx with an absent/unparseable body (responseBody undefined,
+      // or `results` missing/not an array) is indistinguishable from a
+      // genuine "nothing to evaluate" only if we let it fall through as
+      // an empty array — that would wrongly retire the card below. Treat
+      // it as a transport-class failure instead: nothing was confirmed
+      // queued, so leave the card live and tell the room to retry.
+      const results = Array.isArray(responseFields?.results)
+        ? (responseFields!.results as unknown[])
+        : undefined;
+
+      if (!results) {
+        console.warn(
+          `[webex:${account.accountId}] aiops-cve-evaluate got HTTP ${httpStatus} with an absent/unparseable response body for components=${components.join(",")} (actor=${actor})`
+        );
+        const failPlain = `Could not start evaluation for ${components.join(", ")} (unexpected response from the dashboard). Please try again.`;
+        try {
+          await sender.send({
+            to: action.roomId,
+            content: {
+              text: `⚠️ ${failPlain}`,
+              markdown: `⚠️ ${escapeMarkdown(failPlain)}`,
+            },
+            parentId: action.messageId,
+          });
+        } catch (err) {
+          console.warn(
+            `[webex:${account.accountId}] aiops-cve-evaluate failure notice post failed (actor=${actor}): ${err instanceof Error ? err.message : err}`
+          );
+        }
+        return;
+      }
+
+      // M2: "not-found" (component id unknown to the dashboard) and
+      // "no-upgrade-target" (known component, no fixed release tracked
+      // yet) are kept in separate buckets — they call for different
+      // follow-up from an operator — rather than folded into one "skipped"
+      // count.
+      const queuedIds: string[] = [];
+      const noTargetIds: string[] = [];
+      const notFoundIds: string[] = [];
+      for (const r of results) {
+        if (!r || typeof r !== "object") continue;
+        const rec = r as Record<string, unknown>;
+        const cid = typeof rec.component === "string" ? rec.component : undefined;
+        if (!cid) continue;
+        if (rec.status === "evaluating") {
+          queuedIds.push(cid);
+        } else if (rec.status === "not-found") {
+          notFoundIds.push(cid);
+        } else {
+          // "no-upgrade-target" and any other/unrecognized status both
+          // read as "nothing to evaluate yet" for this component.
+          noTargetIds.push(cid);
+        }
+      }
+      const queued = queuedIds.length;
+      const noTarget = noTargetIds.length;
+      const notFound = notFoundIds.length;
+
+      // Shared "N no upgrade target (ids), N not in dashboard (ids)"
+      // fragment, truncated the same way whether it ends up in the card
+      // rewrite (markdown-escaped) or the plain confirmation message.
+      const bucketParts: string[] = [];
+      if (noTarget > 0) bucketParts.push(`${noTarget} no upgrade target (${noTargetIds.join(", ")})`);
+      if (notFound > 0) bucketParts.push(`${notFound} not in dashboard (${notFoundIds.join(", ")})`);
+      const bucketSummary = truncate(bucketParts.join(", ") || components.join(", "), 200);
+
+      if (queued === 0) {
+        // H1: nothing was queued — never retire the card. cve_scan.py
+        // dedups the daily scan per (product, version, advisory), so a
+        // card rewritten here would never come back even once an upgrade
+        // target later becomes known. Post the informational reply and
+        // leave the card live and tappable.
+        const infoPlain = `No upgrade target known yet for ${bucketSummary} — nothing to evaluate; the card stays active and can be retried once a target version is known.`;
+        try {
+          await sender.send({
+            to: action.roomId,
+            content: {
+              text: `ℹ️ ${infoPlain}`,
+              markdown: `ℹ️ ${escapeMarkdown(infoPlain)}`,
+            },
+            parentId: action.messageId,
+          });
+        } catch (err) {
+          console.warn(
+            `[webex:${account.accountId}] aiops-cve-evaluate info notice post failed (actor=${actor}): ${err instanceof Error ? err.message : err}`
+          );
+        }
+        return;
+      }
+
+      // At least one component was actually queued — the card's job is
+      // done, so it's safe (and correct) to retire it as the audit
+      // record.
+      const rewriteSummary = `⚙️ Evaluation started by ${safeActor} · ${ts} UTC — ${queued} queued${bucketParts.length > 0 ? `, ${truncate(bucketParts.join(", "), 200)}` : ""}`;
+      if (sourceMessage) {
+        void rewriteSourceCardAsUsed({
+          account,
+          action,
+          message: sourceMessage,
+          summary: rewriteSummary,
+          sender,
+        });
+      }
+
+      const confirmPlain = `Evaluation started by ${actor} — ${queued} component(s) queued${bucketParts.length > 0 ? `, ${bucketSummary}` : ""}.`;
+      try {
+        await sender.send({
+          to: action.roomId,
+          content: {
+            text: `⚙️ ${confirmPlain}`,
+            markdown: `⚙️ ${escapeMarkdown(confirmPlain)}`,
+          },
+          parentId: action.messageId,
+        });
+      } catch (err) {
+        console.warn(
+          `[webex:${account.accountId}] aiops-cve-evaluate confirmation post failed (actor=${actor}): ${err instanceof Error ? err.message : err}`
+        );
+      }
+    } else if (httpStatus === 401 || httpStatus === 403) {
+      // Auth misconfiguration between bot and dashboard — no evaluation was
+      // started, so the card stays live (no rewrite) and the click can be
+      // retried once an operator fixes the shared secret out-of-band.
+      console.warn(
+        `[webex:${account.accountId}] aiops-cve-evaluate auth failure (HTTP ${httpStatus}) for components=${components.join(",")} (actor=${actor})`
+      );
+      const noteText = `Evaluation authentication is misconfigured between the bot and the dashboard — no evaluation was started. Contact ops.`;
+      try {
+        await sender.send({
+          to: action.roomId,
+          content: {
+            text: `⚠️ ${noteText}`,
+            markdown: `⚠️ ${escapeMarkdown(noteText)}`,
+          },
+          parentId: action.messageId,
+        });
+      } catch (err) {
+        console.warn(
+          `[webex:${account.accountId}] aiops-cve-evaluate auth-failure notice post failed (actor=${actor}): ${err instanceof Error ? err.message : err}`
+        );
+      }
+    } else {
+      // Any other 4xx/5xx or network error — nothing was recorded, so the
+      // card stays live and retryable, exactly like aiops-approval's
+      // equivalent fall-through failure path.
+      console.warn(
+        `[webex:${account.accountId}] aiops-cve-evaluate NOT started for components=${components.join(",")} (actor=${actor}, httpStatus=${httpStatus ?? "n/a"}${networkError ? ", network error" : ""})`
+      );
+      const failPlain = `Could not start evaluation for ${components.join(", ")}${httpStatus ? ` (HTTP ${httpStatus})` : " (request failed)"}. Please try again.`;
+      try {
+        await sender.send({
+          to: action.roomId,
+          content: {
+            text: `⚠️ ${failPlain}`,
+            markdown: `⚠️ ${escapeMarkdown(failPlain)}`,
+          },
+          parentId: action.messageId,
+        });
+      } catch (err) {
+        console.warn(
+          `[webex:${account.accountId}] aiops-cve-evaluate failure notice post failed (actor=${actor}): ${err instanceof Error ? err.message : err}`
+        );
+      }
+    }
+    return;
+  }
+
   // Tap-to-run command buttons: a card Action.Submit carrying
   // `__openclawCommand` executes that slash command as if the submitter
   // had typed it. Authorization for this was already checked above.
