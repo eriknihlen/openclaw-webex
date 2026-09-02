@@ -62,6 +62,10 @@ export const DEFAULT_OUTBOUND_FILE_ROOTS: string[] = (() => {
     // vetted) file here and hands the channel THIS path — not the agent's
     // original. Confirmed live: renders land as media/outbound/<name>---<uuid>.<ext>.
     path.join(state, 'media', 'outbound'),
+    // OpenClaw core's image-generation tool writes its output here
+    // (media/tool-image-generation/<name>---<uuid>.<ext>); the agent then
+    // references that path in a MEDIA: line. Core-managed, no secrets.
+    path.join(state, 'media', 'tool-image-generation'),
     '/tmp',
   ];
 })();
