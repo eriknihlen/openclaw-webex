@@ -50,6 +50,15 @@ const BACKOFF_MAX_MS = 60_000;
 const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const REFRESH_JITTER_MS = 60 * 60 * 1_000;
 
+/**
+ * Inbound dedup window. Mercury activity ids are UUIDs; we remember the
+ * most recent MAX_SEEN_ACTIVITY_IDS and drop a repeat. This is the
+ * belt-and-braces layer behind the socket-generation guard in connect():
+ * even if a stale socket somehow survives, the same message cannot reach
+ * the agent twice.
+ */
+const MAX_SEEN_ACTIVITY_IDS = 1_000;
+
 /** Build a Hydra-format Webex API id from a bare Mercury UUID. */
 export function hydraId(
   kind: "MESSAGE" | "PEOPLE" | "ROOM" | "ATTACHMENT_ACTION",
@@ -85,6 +94,24 @@ export class WebexMercuryTransport {
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private refreshTimer?: ReturnType<typeof setTimeout>;
   private backoffMs = BACKOFF_MIN_MS;
+  /**
+   * Monotonic connect() generation. Incremented on every connect() call;
+   * a connect() that finds itself superseded after its async device
+   * registration abandons without opening a socket. Socket event handlers
+   * also compare `this.ws` to their own socket and ignore stale events.
+   *
+   * Why: the daily "scheduled refresh" raced the old socket's late `close`
+   * event. connect() awaits registerDevice() (an HTTP round-trip) before
+   * assigning this.ws, so when the late close arrived this.ws was still
+   * undefined, the "one pending reconnect" guard passed, and a SECOND
+   * connect() ran. The first socket then opened and was orphaned when the
+   * second overwrote this.ws — still open, still delivering every inbound
+   * message to handleFrame(). One extra socket per day; each message was
+   * processed once per live socket ("Working on it…" ×2, ×3, …).
+   */
+  private connectGeneration = 0;
+  /** Insertion-ordered set of recent Mercury activity ids (see MAX_SEEN_ACTIVITY_IDS). */
+  private readonly seenActivityIds = new Set<string>();
 
   constructor(
     private readonly config: WebexChannelConfig,
@@ -203,11 +230,34 @@ export class WebexMercuryTransport {
   }
 
   private async connect(): Promise<void> {
+    const generation = ++this.connectGeneration;
     const wsUrl = await this.registerDevice();
+
+    // Superseded while registering (another connect() started, or stop()
+    // was called): do not open a socket that nobody will ever own.
+    if (this.stopped || generation !== this.connectGeneration) {
+      this.log("info", "mercury connect superseded during registration — abandoned");
+      return;
+    }
+
+    // Never let two sockets coexist. If a previous socket is still
+    // attached, discard it; its handlers below will see this.ws !== ws
+    // and go inert, so its late close cannot trigger another reconnect.
+    const previous = this.ws;
+    if (previous) {
+      this.log("warn", "mercury replacing a still-attached socket");
+      this.discardSocket(previous);
+    }
+
     const ws = new WebSocket(wsUrl);
     this.ws = ws;
 
     ws.addEventListener("open", () => {
+      if (this.ws !== ws) {
+        // Opened after being superseded — close it, do not adopt it.
+        this.discardSocket(ws);
+        return;
+      }
       this.backoffMs = BACKOFF_MIN_MS;
       ws.send(
         JSON.stringify({
@@ -222,19 +272,34 @@ export class WebexMercuryTransport {
     });
 
     ws.addEventListener("message", (event: MessageEvent) => {
+      if (this.ws !== ws) return; // stale socket: drop, never deliver
       void this.decodeFrame(event.data).then((text) => {
-        if (text) this.handleFrame(text);
+        if (text && this.ws === ws) this.handleFrame(text);
       });
     });
 
     ws.addEventListener("close", () => {
+      // A stale socket closing is expected housekeeping, not an outage.
+      // Only the CURRENT socket's close drives a reconnect — this is the
+      // guard that stops the daily refresh from doubling the connection.
+      if (this.ws !== ws) return;
       this.scheduleReconnect("socket closed");
     });
 
     ws.addEventListener("error", () => {
+      if (this.ws !== ws) return;
       // the close event follows and drives the reconnect
       this.log("warn", "mercury websocket error");
     });
+  }
+
+  /** Close a socket we no longer own. Its handlers self-neutralise via this.ws checks. */
+  private discardSocket(ws: WebSocket): void {
+    try {
+      ws.close();
+    } catch {
+      /* already closed */
+    }
   }
 
   /** Node's global WebSocket may deliver text, ArrayBuffer, or Blob. */
@@ -277,8 +342,27 @@ export class WebexMercuryTransport {
     const activity = frame.data.activity;
     if (!activity?.id || !activity.verb) return;
 
+    if (this.isDuplicateActivity(activity.id)) {
+      this.log("warn", `mercury duplicate activity ${activity.id} dropped`);
+      return;
+    }
+
     const payload = this.activityToPayload(activity);
     if (payload) this.callbacks.onPayload(payload);
+  }
+
+  /**
+   * Remember `id`; report whether it was already seen. Bounded FIFO —
+   * Set preserves insertion order, so evicting the first key is oldest.
+   */
+  private isDuplicateActivity(id: string): boolean {
+    if (this.seenActivityIds.has(id)) return true;
+    this.seenActivityIds.add(id);
+    if (this.seenActivityIds.size > MAX_SEEN_ACTIVITY_IDS) {
+      const oldest = this.seenActivityIds.values().next().value;
+      if (oldest !== undefined) this.seenActivityIds.delete(oldest);
+    }
+    return false;
   }
 
   /**

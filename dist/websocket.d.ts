@@ -50,6 +50,24 @@ export declare class WebexMercuryTransport {
     private reconnectTimer?;
     private refreshTimer?;
     private backoffMs;
+    /**
+     * Monotonic connect() generation. Incremented on every connect() call;
+     * a connect() that finds itself superseded after its async device
+     * registration abandons without opening a socket. Socket event handlers
+     * also compare `this.ws` to their own socket and ignore stale events.
+     *
+     * Why: the daily "scheduled refresh" raced the old socket's late `close`
+     * event. connect() awaits registerDevice() (an HTTP round-trip) before
+     * assigning this.ws, so when the late close arrived this.ws was still
+     * undefined, the "one pending reconnect" guard passed, and a SECOND
+     * connect() ran. The first socket then opened and was orphaned when the
+     * second overwrote this.ws — still open, still delivering every inbound
+     * message to handleFrame(). One extra socket per day; each message was
+     * processed once per live socket ("Working on it…" ×2, ×3, …).
+     */
+    private connectGeneration;
+    /** Insertion-ordered set of recent Mercury activity ids (see MAX_SEEN_ACTIVITY_IDS). */
+    private readonly seenActivityIds;
     constructor(config: WebexChannelConfig, accountId: string, callbacks: MercuryTransportCallbacks);
     private log;
     /**
@@ -73,9 +91,16 @@ export declare class WebexMercuryTransport {
      */
     private registerDevice;
     private connect;
+    /** Close a socket we no longer own. Its handlers self-neutralise via this.ws checks. */
+    private discardSocket;
     /** Node's global WebSocket may deliver text, ArrayBuffer, or Blob. */
     private decodeFrame;
     private handleFrame;
+    /**
+     * Remember `id`; report whether it was already seen. Bounded FIFO —
+     * Set preserves insertion order, so evicting the first key is oldest.
+     */
+    private isDuplicateActivity;
     /**
      * Map a Mercury conversation.activity to the WebexWebhookPayload shape
      * the webhook endpoint receives. Ids are converted to Hydra base64url
