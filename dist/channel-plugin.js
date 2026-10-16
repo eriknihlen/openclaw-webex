@@ -16,6 +16,7 @@ const people_cache_1 = require("./people-cache");
 const formatters_1 = require("./formatters");
 const websocket_1 = require("./websocket");
 const card_builder_1 = require("./card-builder");
+const goal_command_1 = require("./goal-command");
 /** Quick-command buttons appended to every command reply card. */
 const QUICK_COMMANDS = [
     { title: "📊 Status", command: "/status" },
@@ -104,7 +105,9 @@ async function deliverCommandReplyCard(opts) {
             { title: "💤 Think off", command: "/think off" },
             { title: "📊 Status", command: "/status" },
         ]
-        : QUICK_COMMANDS;
+        : opts.command === "/goal"
+            ? goal_command_1.GOAL_QUICK_COMMANDS
+            : QUICK_COMMANDS;
     try {
         const card = (0, card_builder_1.commandReplyCard)({
             command: opts.command,
@@ -889,8 +892,11 @@ async function processEnvelopeAsync(opts) {
     // core without an agent run — a "Working on it…" placeholder is pure
     // noise there, so suppress progress reporting entirely for them. The
     // bot mention has already been stripped by the event handler, so a
-    // command arrives as leading "/".
-    const isCommandTurn = (envelope.content.text ?? "").trimStart().startsWith("/");
+    // command arrives as leading "/". Exception: `/goal <objective>` and
+    // `/goal resume` run the agent (core rewrites them into a continuation
+    // prompt), so they get the normal agent-turn treatment.
+    const isCommandTurn = (envelope.content.text ?? "").trimStart().startsWith("/") &&
+        !(0, goal_command_1.isGoalAgentTurn)(envelope.content.text);
     const commandName = isCommandTurn
         ? (envelope.content.text ?? "").trimStart().split(/\s+/)[0]
         : undefined;
@@ -1115,7 +1121,23 @@ async function dispatchCommandFromCard(opts) {
                 deliver: async (payload) => {
                     if (payload.text) {
                         const baseCommand = command.split(/\s+/)[0];
-                        let handledByPicker = false;
+                        const isGoalRun = (0, goal_command_1.isGoalAgentTurn)(command);
+                        if (isGoalRun) {
+                            // "/goal resume" button: the reply is the agent's answer,
+                            // not a command result, so deliver it as normal text.
+                            await deliverChunked({
+                                sender,
+                                roomId,
+                                parentId,
+                                replyText: payload.text,
+                                roomType: "group",
+                                authorId: personId,
+                                authorDisplayName: displayName,
+                                accountId: account.accountId,
+                                config: account.config,
+                            });
+                        }
+                        let handledByPicker = isGoalRun;
                         if (baseCommand === "/model") {
                             handledByPicker = await deliverModelPickerCard({
                                 cfg,

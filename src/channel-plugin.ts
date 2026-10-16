@@ -45,6 +45,7 @@ import {
   finalizeUsedCard,
   validateForWebex,
 } from "./card-builder";
+import { GOAL_QUICK_COMMANDS, isGoalAgentTurn } from "./goal-command";
 
 /** Quick-command buttons appended to every command reply card. */
 const QUICK_COMMANDS = [
@@ -161,7 +162,9 @@ async function deliverCommandReplyCard(opts: {
         { title: "💤 Think off", command: "/think off" },
         { title: "📊 Status", command: "/status" },
       ]
-    : QUICK_COMMANDS;
+    : opts.command === "/goal"
+      ? GOAL_QUICK_COMMANDS
+      : QUICK_COMMANDS;
   try {
     const card = commandReplyCard({
       command: opts.command,
@@ -1264,8 +1267,12 @@ async function processEnvelopeAsync(opts: {
   // core without an agent run — a "Working on it…" placeholder is pure
   // noise there, so suppress progress reporting entirely for them. The
   // bot mention has already been stripped by the event handler, so a
-  // command arrives as leading "/".
-  const isCommandTurn = (envelope.content.text ?? "").trimStart().startsWith("/");
+  // command arrives as leading "/". Exception: `/goal <objective>` and
+  // `/goal resume` run the agent (core rewrites them into a continuation
+  // prompt), so they get the normal agent-turn treatment.
+  const isCommandTurn =
+    (envelope.content.text ?? "").trimStart().startsWith("/") &&
+    !isGoalAgentTurn(envelope.content.text);
   const commandName = isCommandTurn
     ? (envelope.content.text ?? "").trimStart().split(/\s+/)[0]
     : undefined;
@@ -1519,7 +1526,23 @@ async function dispatchCommandFromCard(opts: {
         deliver: async (payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] }) => {
           if (payload.text) {
             const baseCommand = command.split(/\s+/)[0];
-            let handledByPicker = false;
+            const isGoalRun = isGoalAgentTurn(command);
+            if (isGoalRun) {
+              // "/goal resume" button: the reply is the agent's answer,
+              // not a command result, so deliver it as normal text.
+              await deliverChunked({
+                sender,
+                roomId,
+                parentId,
+                replyText: payload.text,
+                roomType: "group",
+                authorId: personId,
+                authorDisplayName: displayName,
+                accountId: account.accountId,
+                config: account.config,
+              });
+            }
+            let handledByPicker = isGoalRun;
             if (baseCommand === "/model") {
               handledByPicker = await deliverModelPickerCard({
                 cfg,
