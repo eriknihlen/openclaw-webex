@@ -17,6 +17,63 @@ const formatters_1 = require("./formatters");
 const websocket_1 = require("./websocket");
 const card_builder_1 = require("./card-builder");
 const goal_command_1 = require("./goal-command");
+const goal_control_1 = require("./goal-control");
+let goalGateway;
+function getGoalGateway() {
+    goalGateway ??= (0, goal_control_1.createCliGoalGateway)();
+    return goalGateway;
+}
+/**
+ * Answer a plugin-side /goal command (status, edit, pause, block,
+ * complete, clear) with a goal card. Returns false when the Gateway
+ * could not be reached, so the caller falls back to core's /goal.
+ */
+async function handleGoalControl(opts) {
+    let reply;
+    try {
+        reply = await (0, goal_control_1.runGoalControl)(opts.parsed, {
+            sessionKey: opts.sessionKey,
+            agentId: opts.agentId,
+            gateway: getGoalGateway(),
+        });
+    }
+    catch (err) {
+        console.warn(`[webex:${opts.account.accountId}] /goal via gateway failed, falling back to core: ${err instanceof Error ? err.message : err}`);
+        return false;
+    }
+    const sender = new send_1.WebexSender(opts.account.config);
+    try {
+        const card = (0, card_builder_1.commandReplyCard)({
+            command: "/goal",
+            body: reply.text,
+            quickCommands: reply.quickCommands,
+        });
+        (0, card_builder_1.validateForWebex)(card);
+        await sender.send({
+            to: opts.roomId,
+            content: { text: reply.text, card },
+            parentId: opts.parentId,
+        });
+    }
+    catch (err) {
+        console.warn(`[webex:${opts.account.accountId}] goal card delivery failed, sending text: ${err instanceof Error ? err.message : err}`);
+        await sender.send({
+            to: opts.roomId,
+            content: { text: reply.text, markdown: reply.text.replace(/\n/g, "  \n") },
+            parentId: opts.parentId,
+        });
+    }
+    return true;
+}
+/**
+ * Known core rejection when a message arrives while the session's
+ * current run is busy (restart-recovery claim race). Nothing was
+ * processed, so the user just needs to resend later.
+ */
+function isBusySessionRejection(err) {
+    const message = err instanceof Error ? err.message : String(err ?? "");
+    return /restart recovery claim changed|session changed before durable user-turn admission/i.test(message);
+}
 /** Quick-command buttons appended to every command reply card. */
 const QUICK_COMMANDS = [
     { title: "📊 Status", command: "/status" },
@@ -838,6 +895,23 @@ async function processEnvelopeAsync(opts) {
     const inboundText = envelope.content.markdown && envelope.content.markdown.length > 0
         ? envelope.content.markdown
         : envelope.content.text ?? "";
+    // /goal status|edit|pause|block|complete|clear: answered by the plugin
+    // straight from the stored goal, so it works while the agent is busy.
+    const goalCommand = (0, goal_command_1.parseGoalCommand)(envelope.content.text);
+    if ((0, goal_control_1.isGoalControlCommand)(goalCommand)) {
+        const handled = await handleGoalControl({
+            account,
+            roomId: envelope.conversationId,
+            parentId: envelope.metadata.parentId,
+            sessionKey: `agent:${agentId}:webex:${envelope.conversationId}`,
+            agentId,
+            parsed: goalCommand,
+        });
+        if (handled) {
+            cleanupTempFiles(downloaded, account.accountId);
+            return;
+        }
+    }
     const ctxPayload = {
         Body: inboundText,
         RawBody: inboundText,
@@ -912,6 +986,19 @@ async function processEnvelopeAsync(opts) {
         })
         : undefined;
     progress?.update(placeholderText, `*${placeholderText}*`);
+    // `/goal <objective>` or `/goal resume` while another run is busy: core
+    // holds it until that run ends. Say so instead of a silent placeholder.
+    if (progress && (0, goal_command_1.isGoalAgentTurn)(envelope.content.text)) {
+        void getGoalGateway()
+            .describe(`agent:${agentId}:webex:${envelope.conversationId}`, agentId)
+            .then((state) => {
+            if (state?.hasActiveRun) {
+                const queued = "⏳ Queued: I'll start on this goal after my current task.";
+                progress.update(queued, `*${queued}*`);
+            }
+        })
+            .catch(() => { });
+    }
     const DEFAULT_HEARTBEAT_MS = 5 * 60 * 1000;
     const heartbeatMs = account.config.progressHeartbeatMs ?? DEFAULT_HEARTBEAT_MS;
     const startedAt = Date.now();
@@ -925,14 +1012,17 @@ async function processEnvelopeAsync(opts) {
     }
     let replyDelivered = false;
     let errorPosted = false;
-    const postErrorMessage = async () => {
+    const postErrorMessage = async (cause) => {
         if (replyDelivered || errorPosted)
             return;
         errorPosted = true;
         await progress?.close().catch(() => { });
         try {
-            const errText = "Something went wrong while processing your request. " +
-                "Please try again, or use /new to start a fresh session.";
+            const errText = isBusySessionRejection(cause)
+                ? "I'm busy with a task and couldn't take this message. " +
+                    "Nothing was lost; please resend it when I've finished."
+                : "Something went wrong while processing your request. " +
+                    "Please try again, or use /new to start a fresh session.";
             await sender.send({
                 to: envelope.conversationId,
                 content: {
@@ -1044,7 +1134,7 @@ async function processEnvelopeAsync(opts) {
                 },
                 onError: (err) => {
                     console.error(`[webex:${account.accountId}] reply dispatch error: ${err.message}`);
-                    postErrorMessage().catch(() => { });
+                    postErrorMessage(err).catch(() => { });
                 },
             },
             replyOptions: buildProgressReplyOptions(progress, verbosity, Boolean(account.config.progressStreamReasoning)),
@@ -1058,7 +1148,7 @@ async function processEnvelopeAsync(opts) {
     }
     catch (err) {
         console.error(`[webex:${account.accountId}] dispatchReply threw: ${err instanceof Error ? err.message : err}`);
-        await postErrorMessage();
+        await postErrorMessage(err);
     }
     finally {
         if (heartbeatTimer)
@@ -1091,6 +1181,21 @@ async function processEnvelopeAsync(opts) {
  */
 async function dispatchCommandFromCard(opts) {
     const { account, runtime, cfg, command, roomId, parentId, personId, displayName, agentId } = opts;
+    // Goal buttons (status, pause, complete, block, clear) are answered by
+    // the plugin directly; resume still runs the agent through core.
+    const goalCommand = (0, goal_command_1.parseGoalCommand)(command);
+    if ((0, goal_control_1.isGoalControlCommand)(goalCommand)) {
+        const handled = await handleGoalControl({
+            account,
+            roomId,
+            parentId,
+            sessionKey: `agent:${agentId}:webex:${roomId}`,
+            agentId,
+            parsed: goalCommand,
+        });
+        if (handled)
+            return;
+    }
     const dispatchReply = runtime.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher;
     if (!dispatchReply)
         return;
