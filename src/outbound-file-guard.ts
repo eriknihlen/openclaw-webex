@@ -91,6 +91,17 @@ const ALLOWED_EXTENSIONS = new Set([
   '.xml',
   '.log',
   '.zip',
+  '.mp3',
+  '.wav',
+  '.ogg',
+  '.m4a',
+  '.aac',
+  '.pptx',
+  '.ppt',
+  '.docx',
+  '.doc',
+  '.xlsx',
+  '.xls',
 ]);
 
 /**
