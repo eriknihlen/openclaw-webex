@@ -7,6 +7,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.webexPlugin = void 0;
 exports.setPluginRuntime = setPluginRuntime;
+exports.assertWebexTokenAvailable = assertWebexTokenAvailable;
+exports.resolveWebexAccount = resolveWebexAccount;
 const send_1 = require("./send");
 const outbound_file_guard_1 = require("./outbound-file-guard");
 const webhook_1 = require("./webhook");
@@ -17,6 +19,7 @@ const formatters_1 = require("./formatters");
 const websocket_1 = require("./websocket");
 const card_builder_1 = require("./card-builder");
 const goal_command_1 = require("./goal-command");
+const secret_input_1 = require("./secret-input");
 const goal_control_1 = require("./goal-control");
 let goalGateway;
 function getGoalGateway() {
@@ -2202,6 +2205,36 @@ function listWebexAccountIds(cfg) {
     }
     return ids;
 }
+/**
+ * One-time warnings for unresolved optional secrets, keyed by config
+ * path, so a degraded aiopsApprovalSecret is visible in the log without
+ * repeating on every account resolution. Never logs a value or ref id.
+ */
+const warnedUnresolvedSecretPaths = new Set();
+function resolveOptionalSecret(value, path) {
+    if ((0, secret_input_1.webexSecretStatus)(value) === "configured_unavailable") {
+        if (!warnedUnresolvedSecretPaths.has(path)) {
+            warnedUnresolvedSecretPaths.add(path);
+            console.warn(`[webex] ${(0, secret_input_1.unresolvedWebexSecretMessage)(path)} The value is ignored.`);
+        }
+        return undefined;
+    }
+    return (0, secret_input_1.readWebexSecretString)(value);
+}
+/**
+ * Throws when the account's bot token is not a usable string (missing,
+ * or a SecretRef the gateway did not resolve). Call before any Webex API
+ * use so an unresolved ref never becomes `Bearer [object Object]` or an
+ * empty bearer header.
+ */
+function assertWebexTokenAvailable(account) {
+    if (account.tokenStatus === "configured_unavailable") {
+        throw new Error((0, secret_input_1.unresolvedWebexSecretMessage)(account.tokenPath ?? `channels.webex.accounts.${account.accountId}.token`));
+    }
+    if (typeof account.config?.token !== "string" || account.config.token.length === 0) {
+        throw new Error(`Webex account ${account.accountId} has no bot token configured`);
+    }
+}
 function resolveWebexAccount(opts) {
     const { cfg, accountId = DEFAULT_ACCOUNT_ID } = opts;
     const section = cfg.channels?.webex;
@@ -2216,14 +2249,28 @@ function resolveWebexAccount(opts) {
     // Check for named account first
     const namedAccount = section.accounts?.[accountId];
     if (namedAccount) {
-        const token = namedAccount.token ?? section.token;
+        // The gateway resolves SecretRefs before handing us the runtime
+        // config, so `tokenInput` is normally a plain string. An object here
+        // is an unresolved SecretRef: reported as configured (so the failure
+        // is visible in channel status) but never used as a credential.
+        const tokenPath = namedAccount.token !== undefined && namedAccount.token !== null
+            ? `channels.webex.accounts.${accountId}.token`
+            : "channels.webex.token";
+        const tokenInput = namedAccount.token ?? section.token;
+        const tokenStatus = (0, secret_input_1.webexSecretStatus)(tokenInput);
+        const token = (0, secret_input_1.readWebexSecretString)(tokenInput);
+        const approvalSecretPath = namedAccount.aiopsApprovalSecret !== undefined && namedAccount.aiopsApprovalSecret !== null
+            ? `channels.webex.accounts.${accountId}.aiopsApprovalSecret`
+            : "channels.webex.aiopsApprovalSecret";
         return {
             accountId,
             name: namedAccount.name,
             // websocket transport: a token is all that's needed
-            configured: Boolean(token),
+            configured: tokenStatus !== "missing",
             enabled: namedAccount.enabled !== false,
             token,
+            tokenStatus,
+            tokenPath,
             config: {
                 token: token ?? "",
                 //default-deny. Upstream defaulted to
@@ -2244,7 +2291,7 @@ function resolveWebexAccount(opts) {
                 progressStreamReasoning: namedAccount.progressStreamReasoning ??
                     section.progressStreamReasoning,
                 aiopsApprovalUrl: namedAccount.aiopsApprovalUrl ?? section.aiopsApprovalUrl,
-                aiopsApprovalSecret: namedAccount.aiopsApprovalSecret ?? section.aiopsApprovalSecret,
+                aiopsApprovalSecret: resolveOptionalSecret(namedAccount.aiopsApprovalSecret ?? section.aiopsApprovalSecret, approvalSecretPath),
                 outboundFileRoots: namedAccount.outboundFileRoots ?? section.outboundFileRoots,
                 longReplyAttachThreshold: namedAccount.longReplyAttachThreshold ??
                     section.longReplyAttachThreshold,
@@ -2253,15 +2300,19 @@ function resolveWebexAccount(opts) {
     }
     // Fall back to top-level config (default account)
     if (accountId === DEFAULT_ACCOUNT_ID) {
+        const tokenStatus = (0, secret_input_1.webexSecretStatus)(section.token);
+        const token = (0, secret_input_1.readWebexSecretString)(section.token);
         return {
             accountId,
             name: section.name,
             enabled: section.enabled !== false,
             // websocket transport: a token is all that's needed
-            configured: Boolean(section.token),
-            token: section.token,
+            configured: tokenStatus !== "missing",
+            token,
+            tokenStatus,
+            tokenPath: "channels.webex.token",
             config: {
-                token: section.token ?? "",
+                token: token ?? "",
                 //default-deny (see setAccountEnabled note above).
                 dmPolicy: section.dmPolicy ?? "deny",
                 allowFrom: section.allowFrom,
@@ -2276,7 +2327,7 @@ function resolveWebexAccount(opts) {
                 agent: section.agent,
                 progressStreamReasoning: section.progressStreamReasoning,
                 aiopsApprovalUrl: section.aiopsApprovalUrl,
-                aiopsApprovalSecret: section.aiopsApprovalSecret,
+                aiopsApprovalSecret: resolveOptionalSecret(section.aiopsApprovalSecret, "channels.webex.aiopsApprovalSecret"),
                 outboundFileRoots: section.outboundFileRoots,
                 longReplyAttachThreshold: section.longReplyAttachThreshold,
             },
@@ -2454,6 +2505,7 @@ exports.webexPlugin = {
             if (!account?.configured) {
                 throw new Error(`Webex account ${accountId ?? DEFAULT_ACCOUNT_ID} is not configured`);
             }
+            assertWebexTokenAvailable(account);
             const sender = new send_1.WebexSender(account.config);
             // Rewrite unsupported markdown (pipe-tables) and set the `markdown`
             // field the same way deliverChunked does for the normal reply path —
@@ -2482,6 +2534,7 @@ exports.webexPlugin = {
             if (!account?.configured) {
                 throw new Error(`Webex account ${accountId ?? DEFAULT_ACCOUNT_ID} is not configured`);
             }
+            assertWebexTokenAvailable(account);
             const sender = new send_1.WebexSender(account.config);
             // Same markdown rewrite as sendText — the caption travels through
             // the same `text`/`markdown` pair, only `files` differs.
@@ -2567,6 +2620,16 @@ exports.webexPlugin = {
                     elapsedMs: 0,
                 };
             }
+            try {
+                assertWebexTokenAvailable(account);
+            }
+            catch (err) {
+                return {
+                    ok: false,
+                    error: err instanceof Error ? err.message : String(err),
+                    elapsedMs: 0,
+                };
+            }
             const start = Date.now();
             try {
                 const response = await fetch(`${account.config.apiBaseUrl ?? "https://webexapis.com/v1"}/people/me`, {
@@ -2625,6 +2688,10 @@ exports.webexPlugin = {
          */
         startAccount: async (ctx) => {
             const { account, log, setStatus } = ctx;
+            // Fail fast (and visibly, via the channel's lastError) when the
+            // token is an unresolved SecretRef instead of connecting with an
+            // empty or "[object Object]" bearer token.
+            assertWebexTokenAvailable(account);
             setStatus({
                 accountId: account.accountId,
                 baseUrl: account.config.apiBaseUrl ?? "https://webexapis.com/v1",
