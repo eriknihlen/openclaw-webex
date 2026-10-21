@@ -124,12 +124,27 @@ export class WebexWebhookHandler {
     })();
     if (!botUuid) return message;
 
+    // Some Webex clients emit a malformed data-object-id: the base64 also
+    // swallows the next attribute, decoding to
+    // `ciscospark://us/PEOPLE/<uuid>" data-mention-origin="client`. So
+    // compare on the decoded person UUID, not on the raw attribute.
+    const targetsBot = (objectId: string): boolean => {
+      if (objectId === botUuid || objectId === this.botId) return true;
+      try {
+        const decoded = Buffer.from(objectId, 'base64').toString('utf-8');
+        const uuid = /\/PEOPLE\/([0-9a-f-]{36})/i.exec(decoded)?.[1];
+        return uuid?.toLowerCase() === botUuid.toLowerCase();
+      } catch {
+        return false;
+      }
+    };
+
     const mentionRe =
       /<spark-mention\b[^>]*data-object-id="([^"]+)"[^>]*>([^<]*)<\/spark-mention>/g;
     const labels: string[] = [];
     for (const m of message.html.matchAll(mentionRe)) {
       const [, objectId, label] = m;
-      if ((objectId === botUuid || objectId === this.botId) && label) {
+      if (targetsBot(objectId) && label) {
         labels.push(label);
       }
     }
