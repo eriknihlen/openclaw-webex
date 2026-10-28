@@ -22,7 +22,7 @@ exports.WEBEX_SECRET_FIELDS = exports.WEBEX_CHANNEL_KEY = void 0;
 exports.createWebexChannelSecrets = createWebexChannelSecrets;
 exports.WEBEX_CHANNEL_KEY = "webex";
 /** Credential fields that accept a SecretRef, both top-level and per account. */
-exports.WEBEX_SECRET_FIELDS = ["token", "aiopsApprovalSecret"];
+exports.WEBEX_SECRET_FIELDS = ["token", "aiopsApprovalSecret", "bridgeToken"];
 /**
  * Builds the Webex contract with "account-inheritance" semantics, which
  * match resolveWebexAccount(): an account's own field wins; a top-level

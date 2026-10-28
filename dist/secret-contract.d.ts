@@ -18,7 +18,7 @@
  */
 export declare const WEBEX_CHANNEL_KEY = "webex";
 /** Credential fields that accept a SecretRef, both top-level and per account. */
-export declare const WEBEX_SECRET_FIELDS: readonly ["token", "aiopsApprovalSecret"];
+export declare const WEBEX_SECRET_FIELDS: readonly ["token", "aiopsApprovalSecret", "bridgeToken"];
 /** Minimal shape of the host SDK registry entry (openclaw/plugin-sdk). */
 export interface WebexSecretTargetRegistryEntry {
     id: string;

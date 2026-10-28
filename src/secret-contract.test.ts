@@ -33,7 +33,7 @@ const STORE_REF = { source: "store", provider: "teamstore", id: "MARCUS_WEBEX_BO
 const ENV_REF = { source: "env", provider: "default", id: "WEBEX_TEST_TOKEN" };
 
 describe("createWebexChannelSecrets", () => {
-  it("declares token and aiopsApprovalSecret at channel and account scope", () => {
+  it("declares token, aiopsApprovalSecret and bridgeToken at channel and account scope", () => {
     const fake = {
       createSimpleChannelSecretContract: vi.fn(() => ({
         secretTargetRegistryEntries: [],
@@ -72,12 +72,14 @@ describe.skipIf(!hasHostSdk)("contract against the installed OpenClaw SDK", () =
     };
   }
 
-  it("registers the four openclaw.json target paths", async () => {
+  it("registers the six openclaw.json target paths", async () => {
     const contract = await loadContract();
     expect(contract.secretTargetRegistryEntries.map((e) => e.pathPattern).sort()).toEqual([
       "channels.webex.accounts.*.aiopsApprovalSecret",
+      "channels.webex.accounts.*.bridgeToken",
       "channels.webex.accounts.*.token",
       "channels.webex.aiopsApprovalSecret",
+      "channels.webex.bridgeToken",
       "channels.webex.token",
     ]);
     for (const entry of contract.secretTargetRegistryEntries) {
@@ -138,7 +140,7 @@ describe("manifest schema accepts SecretRefs", () => {
   const channelSchema = manifest.channelConfigs.webex.schema;
   const accountProps = channelSchema.properties.accounts.additionalProperties.properties;
 
-  it("token and aiopsApprovalSecret allow string or SecretRef at every level", () => {
+  it("token, aiopsApprovalSecret and bridgeToken allow string or SecretRef at every level", () => {
     const schemas = [
       channelSchema.properties,
       accountProps,
@@ -165,6 +167,8 @@ describe("manifest schema accepts SecretRefs", () => {
       "aiopsApprovalSecret",
       "accounts.*.token",
       "accounts.*.aiopsApprovalSecret",
+      "bridgeToken",
+      "accounts.*.bridgeToken",
     ]);
   });
 

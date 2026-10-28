@@ -38,6 +38,7 @@ import type {
   WebexWebhookPayload,
 } from "./types";
 import { WebexMercuryTransport } from "./websocket";
+import { WebexBridgeTransport } from "./bridge";
 import {
   cardAlreadyUsed,
   commandPickerCard,
@@ -772,6 +773,14 @@ interface WebexChannelSection {
    */
   aiopsApprovalSecret?: WebexSecretInput;
   /**
+   * Webex event bridge (see bridge.ts). When set, inbound events come
+   * from the bridge's stream instead of a Mercury websocket in this
+   * process. See WebexChannelConfig.bridgeUrl.
+   */
+  bridgeUrl?: string;
+  /** Subscriber token for the bridge. Plaintext or an OpenClaw SecretRef object. */
+  bridgeToken?: WebexSecretInput;
+  /**
    * Allowed root directories for outbound local file sends. See
    * WebexChannelConfig.outboundFileRoots.
    */
@@ -819,6 +828,10 @@ interface WebexAccountConfig {
    * section's setting. Plaintext or an OpenClaw SecretRef object.
    */
   aiopsApprovalSecret?: WebexSecretInput;
+  /** Webex event bridge for this named account. Falls back to the top-level section's setting. */
+  bridgeUrl?: string;
+  /** Bridge subscriber token for this named account. Plaintext or an OpenClaw SecretRef object. */
+  bridgeToken?: WebexSecretInput;
   /**
    * Allowed root directories for outbound local file sends for this
    * named account. Falls back to the top-level section's setting.
@@ -2830,6 +2843,10 @@ export function resolveWebexAccount(opts: {
       namedAccount.aiopsApprovalSecret !== undefined && namedAccount.aiopsApprovalSecret !== null
         ? `channels.webex.accounts.${accountId}.aiopsApprovalSecret`
         : "channels.webex.aiopsApprovalSecret";
+    const bridgeTokenPath =
+      namedAccount.bridgeToken !== undefined && namedAccount.bridgeToken !== null
+        ? `channels.webex.accounts.${accountId}.bridgeToken`
+        : "channels.webex.bridgeToken";
 
     return {
       accountId,
@@ -2869,6 +2886,11 @@ export function resolveWebexAccount(opts: {
         aiopsApprovalSecret: resolveOptionalSecret(
           namedAccount.aiopsApprovalSecret ?? section.aiopsApprovalSecret,
           approvalSecretPath
+        ),
+        bridgeUrl: namedAccount.bridgeUrl ?? section.bridgeUrl,
+        bridgeToken: resolveOptionalSecret(
+          namedAccount.bridgeToken ?? section.bridgeToken,
+          bridgeTokenPath
         ),
         outboundFileRoots:
           namedAccount.outboundFileRoots ?? section.outboundFileRoots,
@@ -2912,6 +2934,8 @@ export function resolveWebexAccount(opts: {
           section.aiopsApprovalSecret,
           "channels.webex.aiopsApprovalSecret"
         ),
+        bridgeUrl: section.bridgeUrl,
+        bridgeToken: resolveOptionalSecret(section.bridgeToken, "channels.webex.bridgeToken"),
         outboundFileRoots: section.outboundFileRoots,
         longReplyAttachThreshold: section.longReplyAttachThreshold,
       },
@@ -3336,41 +3360,47 @@ export const webexPlugin: ChannelPlugin<ResolvedWebexAccount> = {
         baseUrl: account.config.apiBaseUrl ?? "https://webexapis.com/v1",
       });
 
+      const bridgeUrl = account.config.bridgeUrl;
       log?.info?.(
-        `[${account.accountId}] starting Webex provider (websocket mode)`
+        `[${account.accountId}] starting Webex provider (${bridgeUrl ? "bridge" : "websocket"} mode)`
       );
 
       const eventHandler = new WebexWebhookHandler(account.config);
       await eventHandler.initialize();
 
-      const mercury = new WebexMercuryTransport(
-        account.config,
-        account.accountId,
-        {
-          onPayload: (payload) => {
-            void dispatchTransportPayload({
-              payload,
-              account,
-              webhookHandler: eventHandler,
-            }).catch((err) => {
-              console.error(
-                `[webex:${account.accountId}] mercury dispatch failed: ${err instanceof Error ? err.message : err}`
-              );
-            });
-          },
-          onLog: (level, msg) => {
-            (log?.[level] ?? console[level === "error" ? "error" : "log"])?.(
-              msg
+      const callbacks: ConstructorParameters<typeof WebexMercuryTransport>[2] = {
+        onPayload: (payload) => {
+          void dispatchTransportPayload({
+            payload,
+            account,
+            webhookHandler: eventHandler,
+          }).catch((err) => {
+            console.error(
+              `[webex:${account.accountId}] inbound dispatch failed: ${err instanceof Error ? err.message : err}`
             );
-          },
-        }
-      );
-      await mercury.start();
+          });
+        },
+        onLog: (level, msg) => {
+          (log?.[level] ?? console[level === "error" ? "error" : "log"])?.(msg);
+        },
+      };
+      // Bridge mode: the Mercury websocket lives in the bridge process
+      // (bridge.ts); this process only reads its event stream.
+      const transport = bridgeUrl
+        ? new WebexBridgeTransport(
+            { bridgeUrl, bridgeToken: account.config.bridgeToken ?? "" },
+            account.accountId,
+            callbacks
+          )
+        : new WebexMercuryTransport(account.config, account.accountId, callbacks);
+      await transport.start();
       log?.info?.(
-        `[${account.accountId}] mercury websocket transport started (no inbound endpoint)`
+        bridgeUrl
+          ? `[${account.accountId}] bridge transport started (${bridgeUrl})`
+          : `[${account.accountId}] mercury websocket transport started (no inbound endpoint)`
       );
       const unregister = () => {
-        void mercury.stop();
+        void transport.stop();
       };
 
       const abortSignal = ctx.abortSignal;

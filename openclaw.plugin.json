@@ -155,7 +155,7 @@
       },
       "progressStreamReasoning": {
         "type": "boolean",
-        "description": "When true, stream the agent's reasoning text live into the Webex progress message instead of the static \"\ud83d\udcad Thinking\u2026\" label. Opt-in because raw reasoning occasionally contains internal deliberation or echoed context users didn't intend to see; redaction is best-effort.",
+        "description": "When true, stream the agent's reasoning text live into the Webex progress message instead of the static \"💭 Thinking…\" label. Opt-in because raw reasoning occasionally contains internal deliberation or echoed context users didn't intend to see; redaction is best-effort.",
         "default": false
       },
       "aiopsApprovalUrl": {
@@ -564,12 +564,224 @@
             },
             "progressPlaceholderText": {
               "type": "string"
+            },
+            "bridgeUrl": {
+              "type": "string",
+              "description": "Webex event bridge base URL (for example http://webex-bridge:8790). When set, inbound events come from the bridge instead of a Mercury websocket in the gateway process."
+            },
+            "bridgeToken": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "source": {
+                          "type": "string",
+                          "const": "env"
+                        },
+                        "provider": {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                        },
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                        }
+                      },
+                      "required": [
+                        "source",
+                        "provider",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "source": {
+                          "type": "string",
+                          "const": "store"
+                        },
+                        "provider": {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                        },
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                        }
+                      },
+                      "required": [
+                        "source",
+                        "provider",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "source": {
+                          "type": "string",
+                          "const": "file"
+                        },
+                        "provider": {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "source",
+                        "provider",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "source": {
+                          "type": "string",
+                          "const": "exec"
+                        },
+                        "provider": {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "source",
+                        "provider",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              ],
+              "description": "Subscriber token the Webex event bridge requires. Plaintext or an OpenClaw SecretRef object."
             }
           },
           "required": [
             "token"
           ]
         }
+      },
+      "bridgeUrl": {
+        "type": "string",
+        "description": "Webex event bridge base URL (for example http://webex-bridge:8790). When set, inbound events come from the bridge instead of a Mercury websocket in the gateway process."
+      },
+      "bridgeToken": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "const": "env"
+                  },
+                  "provider": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                  }
+                },
+                "required": [
+                  "source",
+                  "provider",
+                  "id"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "const": "store"
+                  },
+                  "provider": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                  }
+                },
+                "required": [
+                  "source",
+                  "provider",
+                  "id"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "const": "file"
+                  },
+                  "provider": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "provider",
+                  "id"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "const": "exec"
+                  },
+                  "provider": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "provider",
+                  "id"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        ],
+        "description": "Subscriber token the Webex event bridge requires. Plaintext or an OpenClaw SecretRef object."
       }
     }
   },
@@ -590,6 +802,14 @@
         },
         {
           "path": "accounts.*.aiopsApprovalSecret",
+          "expected": "string"
+        },
+        {
+          "path": "bridgeToken",
+          "expected": "string"
+        },
+        {
+          "path": "accounts.*.bridgeToken",
           "expected": "string"
         }
       ]
@@ -1147,12 +1367,224 @@
                 },
                 "progressPlaceholderText": {
                   "type": "string"
+                },
+                "bridgeUrl": {
+                  "type": "string",
+                  "description": "Webex event bridge base URL (for example http://webex-bridge:8790). When set, inbound events come from the bridge instead of a Mercury websocket in the gateway process."
+                },
+                "bridgeToken": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "source": {
+                              "type": "string",
+                              "const": "env"
+                            },
+                            "provider": {
+                              "type": "string",
+                              "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                            },
+                            "id": {
+                              "type": "string",
+                              "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                            }
+                          },
+                          "required": [
+                            "source",
+                            "provider",
+                            "id"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "source": {
+                              "type": "string",
+                              "const": "store"
+                            },
+                            "provider": {
+                              "type": "string",
+                              "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                            },
+                            "id": {
+                              "type": "string",
+                              "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                            }
+                          },
+                          "required": [
+                            "source",
+                            "provider",
+                            "id"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "source": {
+                              "type": "string",
+                              "const": "file"
+                            },
+                            "provider": {
+                              "type": "string",
+                              "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                            },
+                            "id": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "source",
+                            "provider",
+                            "id"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "source": {
+                              "type": "string",
+                              "const": "exec"
+                            },
+                            "provider": {
+                              "type": "string",
+                              "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                            },
+                            "id": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "source",
+                            "provider",
+                            "id"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  ],
+                  "description": "Subscriber token the Webex event bridge requires. Plaintext or an OpenClaw SecretRef object."
                 }
               },
               "required": [
                 "token"
               ]
             }
+          },
+          "bridgeUrl": {
+            "type": "string",
+            "description": "Webex event bridge base URL (for example http://webex-bridge:8790). When set, inbound events come from the bridge instead of a Mercury websocket in the gateway process."
+          },
+          "bridgeToken": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "source": {
+                        "type": "string",
+                        "const": "env"
+                      },
+                      "provider": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                      },
+                      "id": {
+                        "type": "string",
+                        "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                      }
+                    },
+                    "required": [
+                      "source",
+                      "provider",
+                      "id"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "source": {
+                        "type": "string",
+                        "const": "store"
+                      },
+                      "provider": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                      },
+                      "id": {
+                        "type": "string",
+                        "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                      }
+                    },
+                    "required": [
+                      "source",
+                      "provider",
+                      "id"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "source": {
+                        "type": "string",
+                        "const": "file"
+                      },
+                      "provider": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                      },
+                      "id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "source",
+                      "provider",
+                      "id"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "source": {
+                        "type": "string",
+                        "const": "exec"
+                      },
+                      "provider": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                      },
+                      "id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "source",
+                      "provider",
+                      "id"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            ],
+            "description": "Subscriber token the Webex event bridge requires. Plaintext or an OpenClaw SecretRef object."
           }
         },
         "anyOf": [
@@ -1202,6 +1634,14 @@
           "label": "AIOps Approval Secret",
           "sensitive": true,
           "placeholder": "Shared secret sent as X-AIOps-Approval-Secret"
+        },
+        "bridgeUrl": {
+          "label": "Event Bridge URL",
+          "placeholder": "http://webex-bridge:8790"
+        },
+        "bridgeToken": {
+          "label": "Event Bridge Token",
+          "sensitive": true
         }
       },
       "commands": {
@@ -1271,6 +1711,14 @@
       "label": "AIOps Approval Secret",
       "sensitive": true,
       "placeholder": "Shared secret sent as X-AIOps-Approval-Secret"
+    },
+    "bridgeUrl": {
+      "label": "Event Bridge URL",
+      "placeholder": "http://webex-bridge:8790"
+    },
+    "bridgeToken": {
+      "label": "Event Bridge Token",
+      "sensitive": true
     }
   }
 }

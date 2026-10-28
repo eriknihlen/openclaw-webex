@@ -61,6 +61,25 @@ carry only IDs — message content is always fetched from the Webex API, never
 trusted from the push. If the socket drops (or answers pings without delivering
 events), the plugin re-registers and reconnects automatically.
 
+### Bridge mode
+
+An egress guardrail inside the gateway process can break the Mercury socket:
+DefenseClaw's fetch interceptor treats any URL whose path contains `/messages`
+as model traffic and reroutes it through its proxy, where the ping/pong
+keepalive times out. Bridge mode moves the socket into a separate process:
+
+```
+Webex Mercury ──wss──▶ bridge (node dist/bridge-main.js) ──SSE /v1/events──▶ gateway plugin
+```
+
+The bridge holds the Mercury connection and serves the same webhook-shaped
+payloads as a Server-Sent Events stream, on a private network, to one
+subscriber authenticated with a shared token (`bridgeToken`). Events that
+arrive while the gateway is down are kept for up to 15 minutes. Every REST
+call (message fetch, replies, cards) stays in the gateway. Set `bridgeUrl` and
+`bridgeToken` on the account; the bridge reads the bot token and the shared
+token from files (see the header of `src/bridge-main.ts`).
+
 ## Prerequisites
 
 - **Node.js ≥ 22** — the transport uses the built-in global `WebSocket`/`FormData`.
@@ -153,6 +172,8 @@ That's the whole setup — no webhook URL, no signing secret, no reverse proxy.
 | `progressHeartbeatMs` | number | `300000` | "Still working…" refresh interval; `0` disables. |
 | `progressStreamReasoning` | bool | `false` | Stream the agent's reasoning tail into the progress message (opt-in). |
 | `showProgressPlaceholder` | bool | `true` | `false` disables progress output entirely. |
+| `bridgeUrl` | string | — | Read inbound events from a Webex event bridge (see Bridge mode) instead of opening Mercury in the gateway. |
+| `bridgeToken` | string | — | Subscriber token the bridge requires. Plaintext or a SecretRef. |
 
 ## Adaptive Cards
 
@@ -202,6 +223,8 @@ checkout is runtime-consumable without a build.
 src/
 ├── websocket.ts       Mercury WebSocket transport (device registration,
 │                      keepalive, reconnect, daily refresh)
+├── bridge.ts          Event bridge: SSE server and the plugin's bridge client
+├── bridge-main.ts     Bridge process entry point (Mercury → SSE)
 ├── webhook.ts         Event validation, allowlist, fetch, normalization
 ├── channel-plugin.ts  OpenClaw glue: accounts, dispatch, progress wiring
 ├── send.ts            REST client + rate limiting + message editing

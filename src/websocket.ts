@@ -123,6 +123,11 @@ export class WebexMercuryTransport {
     this.callbacks.onLog?.(level, `[webex:${this.accountId}] ${msg}`);
   }
 
+  /** True while the current socket is open (the bridge's health check). */
+  get connected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
   /**
    * Register the device and open the first connection. Throws if the
    * initial device registration fails (so startup surfaces a clear

@@ -70,6 +70,8 @@ export declare class WebexMercuryTransport {
     private readonly seenActivityIds;
     constructor(config: WebexChannelConfig, accountId: string, callbacks: MercuryTransportCallbacks);
     private log;
+    /** True while the current socket is open (the bridge's health check). */
+    get connected(): boolean;
     /**
      * Register the device and open the first connection. Throws if the
      * initial device registration fails (so startup surfaces a clear

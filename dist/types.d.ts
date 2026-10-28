@@ -73,6 +73,15 @@ export interface WebexChannelConfig {
      */
     aiopsApprovalSecret?: string;
     /**
+     * Webex event bridge base URL (for example http://webex-bridge:8790).
+     * When set, inbound events are read from the bridge's event stream
+     * (bridge.ts) and this process opens no Mercury websocket. Use it when
+     * an egress guardrail in the gateway process breaks the websocket.
+     */
+    bridgeUrl?: string;
+    /** Subscriber token the bridge requires (Authorization: Bearer). Never logged. */
+    bridgeToken?: string;
+    /**
      * Allowed root directories for outbound local file sends (see
      * outbound-file-guard.ts's resolveAllowedOutboundFile). A local path
      * must canonicalize to somewhere inside one of these roots — and pass

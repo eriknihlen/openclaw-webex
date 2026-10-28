@@ -70,6 +70,14 @@ interface WebexChannelSection {
      */
     aiopsApprovalSecret?: WebexSecretInput;
     /**
+     * Webex event bridge (see bridge.ts). When set, inbound events come
+     * from the bridge's stream instead of a Mercury websocket in this
+     * process. See WebexChannelConfig.bridgeUrl.
+     */
+    bridgeUrl?: string;
+    /** Subscriber token for the bridge. Plaintext or an OpenClaw SecretRef object. */
+    bridgeToken?: WebexSecretInput;
+    /**
      * Allowed root directories for outbound local file sends. See
      * WebexChannelConfig.outboundFileRoots.
      */
@@ -116,6 +124,10 @@ interface WebexAccountConfig {
      * section's setting. Plaintext or an OpenClaw SecretRef object.
      */
     aiopsApprovalSecret?: WebexSecretInput;
+    /** Webex event bridge for this named account. Falls back to the top-level section's setting. */
+    bridgeUrl?: string;
+    /** Bridge subscriber token for this named account. Plaintext or an OpenClaw SecretRef object. */
+    bridgeToken?: WebexSecretInput;
     /**
      * Allowed root directories for outbound local file sends for this
      * named account. Falls back to the top-level section's setting.
