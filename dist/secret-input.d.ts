@@ -4,7 +4,7 @@
  * `channels.webex.token`, `channels.webex.accounts.<id>.token` and
  * `aiopsApprovalSecret` (top-level or per account) accept either a
  * plaintext string or an OpenClaw SecretRef object such as
- * `{ source: "store", provider: "teamstore", id: "MARCUS_WEBEX_BOT_TOKEN" }`.
+ * `{ source: "store", provider: "teamstore", id: "WEBEX_BOT_TOKEN" }`.
  *
  * The plugin never resolves SecretRefs itself. The gateway resolves them
  * through the channel secret contract (see secret-contract-api.ts) and

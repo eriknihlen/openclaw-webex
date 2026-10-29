@@ -2,7 +2,7 @@
 /**
  * Path-safety gate for outbound local file sends.
  *
- * Marcus (the agent) can hand the plugin a local path — a rendered
+ * The agent can hand the plugin a local path — a rendered
  * diagram, a report file — that it wants delivered to Webex via
  * WebexSender.sendLocalFile (multipart upload). Nothing upstream of this
  * gate validates that path: outbound.sendMedia's mediaUrl and the

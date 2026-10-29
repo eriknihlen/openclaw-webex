@@ -1043,7 +1043,7 @@ async function deliverLongReplyAsAttachment(opts: {
   const path = require("node:path") as typeof import("node:path");
   const fsp = require("node:fs/promises") as typeof import("node:fs/promises");
 
-  const tempPath = path.join(os.tmpdir(), `marcus-reply-${Date.now()}.md`);
+  const tempPath = path.join(os.tmpdir(), `webex-reply-${Date.now()}.md`);
   let wrote = false;
 
   try {

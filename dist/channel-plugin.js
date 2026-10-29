@@ -674,7 +674,7 @@ async function deliverLongReplyAsAttachment(opts) {
     const os = require("node:os");
     const path = require("node:path");
     const fsp = require("node:fs/promises");
-    const tempPath = path.join(os.tmpdir(), `marcus-reply-${Date.now()}.md`);
+    const tempPath = path.join(os.tmpdir(), `webex-reply-${Date.now()}.md`);
     let wrote = false;
     try {
         // mode 0o600 keeps the file unreadable to other local users; flag

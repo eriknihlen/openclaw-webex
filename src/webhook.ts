@@ -101,10 +101,10 @@ export class WebexWebhookHandler {
    * Strip the bot's own leading @mention from the message text.
    *
    * Webex renders a mention as the person's display label inside `text`
-   * ("Marcus /help"), so forwarding the raw text makes every group turn
+   * ("Atlas /help"), so forwarding the raw text makes every group turn
    * start with the bot's name — and worse, splits mention-prefixed
    * commands: core extracts "/help" but then dispatches the leftover
-   * "Marcus" as a real prompt, producing a command reply AND a chat
+   * "Atlas" as a real prompt, producing a command reply AND a chat
    * reply. The rendered label is not guessable from the display name
    * (clients may render a short form), so we take it from the message
    * `html`, where the mention is an explicit <spark-mention> tag whose
