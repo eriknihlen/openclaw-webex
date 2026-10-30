@@ -31,6 +31,7 @@ export const DEFAULT_ALLOWED_CONTENT_TYPES: ReadonlySet<string> = new Set([
   "text/plain",
   "text/csv",
   "text/markdown",
+  "text/html",
   "application/json",
   "application/xml",
   "text/xml",
@@ -152,6 +153,7 @@ export async function downloadWebexAttachment(
 
   const declaredLength = Number(okResponse.headers.get('content-length') ?? 0);
   if (declaredLength && declaredLength > maxBytes) {
+    options.onWarn?.(`rejected attachment: larger than ${Math.round(maxBytes / 1024 / 1024)} MB`);
     return null;
   }
 
@@ -170,6 +172,7 @@ export async function downloadWebexAttachment(
 
   const buffer = Buffer.from(await okResponse.arrayBuffer());
   if (buffer.length > maxBytes) {
+    options.onWarn?.(`rejected attachment: larger than ${Math.round(maxBytes / 1024 / 1024)} MB`);
     return null;
   }
 

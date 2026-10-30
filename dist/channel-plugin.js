@@ -849,13 +849,21 @@ async function processEnvelopeAsync(opts) {
     // Download inbound attachments eagerly. Webex file URLs require the
     // bot token, and OpenClaw core expects local paths.
     const downloaded = [];
+    // Files the download refused (type not allowed, too large): the sender is told below, never silence.
+    const rejected = [];
     for (const attachment of envelope.content.attachments ?? []) {
         if (attachment.type !== "file" || !attachment.url)
             continue;
         try {
-            const result = await (0, download_1.downloadWebexAttachment)(attachment.url, account.config.token);
-            if (!result)
+            let reason = "";
+            const result = await (0, download_1.downloadWebexAttachment)(attachment.url, account.config.token, { onWarn: (message) => { reason = message.replace(/^rejected attachment: /, ""); } });
+            if (!result) {
+                if (reason) {
+                    rejected.push(reason);
+                    console.warn(`[webex:${account.accountId}] attachment ${reason}`);
+                }
                 continue;
+            }
             attachment.localPath = result.localPath;
             attachment.contentType = result.contentType;
             attachment.name = result.name;
@@ -865,6 +873,23 @@ async function processEnvelopeAsync(opts) {
         catch (err) {
             console.warn(`[webex:${account.accountId}] attachment download failed: ${err instanceof Error ? err.message : err}`);
         }
+    }
+    if (rejected.length > 0) {
+        const notice = `I could not take ${rejected.length === 1 ? "your file" : `${rejected.length} of your files`}: ` +
+            `${[...new Set(rejected)].join("; ")}. Images, PDF, text, HTML, CSV, JSON, YAML, ZIP and Office files up to 25 MB work.`;
+        try {
+            await new send_1.WebexSender(account.config).send({
+                to: envelope.conversationId,
+                content: { text: notice, markdown: `⚠️ ${notice}` },
+                parentId: envelope.metadata.parentId,
+            });
+        }
+        catch (err) {
+            console.warn(`[webex:${account.accountId}] could not tell the sender about a rejected file: ${err instanceof Error ? err.message : err}`);
+        }
+        // A message that was only the refused file has nothing left for the agent.
+        if (downloaded.length === 0 && !(envelope.content.text ?? "").trim())
+            return;
     }
     const mediaPaths = downloaded.map((d) => d.localPath);
     const mediaTypes = downloaded

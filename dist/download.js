@@ -68,6 +68,7 @@ exports.DEFAULT_ALLOWED_CONTENT_TYPES = new Set([
     "text/plain",
     "text/csv",
     "text/markdown",
+    "text/html",
     "application/json",
     "application/xml",
     "text/xml",
@@ -147,6 +148,7 @@ async function downloadWebexAttachment(url, token, options = {}) {
     const okResponse = response;
     const declaredLength = Number(okResponse.headers.get('content-length') ?? 0);
     if (declaredLength && declaredLength > maxBytes) {
+        options.onWarn?.(`rejected attachment: larger than ${Math.round(maxBytes / 1024 / 1024)} MB`);
         return null;
     }
     const contentType = stripCharset(okResponse.headers.get('content-type')) ?? undefined;
@@ -159,6 +161,7 @@ async function downloadWebexAttachment(url, token, options = {}) {
     }
     const buffer = Buffer.from(await okResponse.arrayBuffer());
     if (buffer.length > maxBytes) {
+        options.onWarn?.(`rejected attachment: larger than ${Math.round(maxBytes / 1024 / 1024)} MB`);
         return null;
     }
     const fileName = `webex-${crypto.randomUUID()}${extensionFor(name, contentType)}`;
