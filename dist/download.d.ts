@@ -28,9 +28,15 @@ export interface DownloadOptions {
     allowedContentTypes?: ReadonlySet<string>;
     /** Injected for tests */
     fetchImpl?: typeof fetch;
-    /** Injected for tests */
+    /** Injected for tests; also the inbound folder when the account sets inboundDir. */
     tmpDir?: string;
+    /** Save under the file's own name (timestamp-prefixed) instead of a random one. */
+    keepName?: boolean;
     /** Non-fatal warning hook (e.g. type rejected). */
     onWarn?: (message: string) => void;
 }
 export declare function downloadWebexAttachment(url: string, token: string, options?: DownloadOptions): Promise<DownloadedAttachment | null>;
+/** A file name that is safe on disk: no folders, no leading dot, at most 120 characters. */
+export declare function safeFileName(name: string): string;
+/** Delete files older than maxAgeMs in an inbound folder (best effort). */
+export declare function pruneInboundDir(dir: string, maxAgeMs: number): Promise<void>;

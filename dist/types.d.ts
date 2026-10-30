@@ -82,6 +82,13 @@ export interface WebexChannelConfig {
     /** Subscriber token the bridge requires (Authorization: Bearer). Never logged. */
     bridgeToken?: string;
     /**
+     * Folder for inbound attachments (for example <workspace>/inbound/webex). When set, files are
+     * saved there under their own name, kept for 7 days, and their paths are named in the message,
+     * so an agent whose file tools stop at the workspace, or whose commands run on a node sharing
+     * only the workspace, can open them. Unset: a temp file, deleted after the turn.
+     */
+    inboundDir?: string;
+    /**
      * Allowed root directories for outbound local file sends (see
      * outbound-file-guard.ts's resolveAllowedOutboundFile). A local path
      * must canonicalize to somewhere inside one of these roots — and pass

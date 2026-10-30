@@ -63,8 +63,10 @@ export interface DownloadOptions {
   allowedContentTypes?: ReadonlySet<string>;
   /** Injected for tests */
   fetchImpl?: typeof fetch;
-  /** Injected for tests */
+  /** Injected for tests; also the inbound folder when the account sets inboundDir. */
   tmpDir?: string;
+  /** Save under the file's own name (timestamp-prefixed) instead of a random one. */
+  keepName?: boolean;
   /** Non-fatal warning hook (e.g. type rejected). */
   onWarn?: (message: string) => void;
 }
@@ -176,7 +178,9 @@ export async function downloadWebexAttachment(
     return null;
   }
 
-  const fileName = `webex-${crypto.randomUUID()}${extensionFor(name, contentType)}`;
+  const fileName = options.keepName && name
+    ? `${new Date().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '').replace('T', '-')}-${safeFileName(name)}`
+    : `webex-${crypto.randomUUID()}${extensionFor(name, contentType)}`;
   const localPath = path.join(tmpDir, fileName);
   await fs.writeFile(localPath, buffer);
 
@@ -198,6 +202,33 @@ function parseFilenameFromDisposition(disposition: string): string | undefined {
 
   const match = disposition.match(/filename="?([^";]+)"?/i);
   return match ? match[1].trim() : undefined;
+}
+
+/** A file name that is safe on disk: no folders, no leading dot, at most 120 characters. */
+export function safeFileName(name: string): string {
+  const base = name.split(/[\\/]/).pop() ?? '';
+  const cleaned = base.replace(/[^A-Za-z0-9._ -]/g, '_').replace(/^[.\s]+/, '').trim();
+  return (cleaned || 'file').slice(-120);
+}
+
+/** Delete files older than maxAgeMs in an inbound folder (best effort). */
+export async function pruneInboundDir(dir: string, maxAgeMs: number): Promise<void> {
+  let entries: string[] = [];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return;
+  }
+  const cutoff = Date.now() - maxAgeMs;
+  for (const entry of entries) {
+    const p = path.join(dir, entry);
+    try {
+      const st = await fs.stat(p);
+      if (st.isFile() && st.mtimeMs < cutoff) await fs.unlink(p);
+    } catch {
+      // gone or unreadable: nothing to prune
+    }
+  }
 }
 
 function stripCharset(contentType: string | null): string | undefined {

@@ -17,7 +17,7 @@ import {
   WebexWebhookHandler,
   type AttachmentActionEvent,
 } from "./webhook";
-import { downloadWebexAttachment, type DownloadedAttachment } from "./download";
+import { downloadWebexAttachment, pruneInboundDir, type DownloadedAttachment } from "./download";
 import { createProgressReporter, type ProgressReporter } from "./progress";
 import { createPeopleCache, type PeopleCache } from "./people-cache";
 import {
@@ -780,6 +780,8 @@ interface WebexChannelSection {
   bridgeUrl?: string;
   /** Subscriber token for the bridge. Plaintext or an OpenClaw SecretRef object. */
   bridgeToken?: WebexSecretInput;
+  /** Folder for inbound attachments. See WebexChannelConfig.inboundDir. */
+  inboundDir?: string;
   /**
    * Allowed root directories for outbound local file sends. See
    * WebexChannelConfig.outboundFileRoots.
@@ -832,6 +834,8 @@ interface WebexAccountConfig {
   bridgeUrl?: string;
   /** Bridge subscriber token for this named account. Plaintext or an OpenClaw SecretRef object. */
   bridgeToken?: WebexSecretInput;
+  /** Inbound attachment folder for this named account. Falls back to the top-level section's setting. */
+  inboundDir?: string;
   /**
    * Allowed root directories for outbound local file sends for this
    * named account. Falls back to the top-level section's setting.
@@ -1237,6 +1241,9 @@ async function deliverReplyMedia(opts: {
  * All errors are logged or surfaced as progress messages; nothing
  * propagates back up the stack.
  */
+/** How long inbound attachments stay in inboundDir. */
+const INBOUND_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+
 async function processEnvelopeAsync(opts: {
   envelope: import("./types").OpenClawEnvelope;
   account: any;
@@ -1250,6 +1257,13 @@ async function processEnvelopeAsync(opts: {
   const downloaded: DownloadedTemp[] = [];
   // Files the download refused (type not allowed, too large): the sender is told below, never silence.
   const rejected: string[] = [];
+  // With inboundDir the files go where the agent can open them and stay 7 days; otherwise temp files.
+  const inboundDir: string | undefined = account.config.inboundDir || undefined;
+  if (inboundDir && (envelope.content.attachments ?? []).some((a) => a.type === "file")) {
+    const fsp = require("node:fs/promises") as typeof import("node:fs/promises");
+    await fsp.mkdir(inboundDir, { recursive: true });
+    await pruneInboundDir(inboundDir, INBOUND_KEEP_MS);
+  }
   for (const attachment of envelope.content.attachments ?? []) {
     if (attachment.type !== "file" || !attachment.url) continue;
     try {
@@ -1257,7 +1271,10 @@ async function processEnvelopeAsync(opts: {
       const result = await downloadWebexAttachment(
         attachment.url,
         account.config.token,
-        { onWarn: (message) => { reason = message.replace(/^rejected attachment: /, ""); } }
+        {
+          onWarn: (message) => { reason = message.replace(/^rejected attachment: /, ""); },
+          ...(inboundDir ? { tmpDir: inboundDir, keepName: true } : {}),
+        }
       );
       if (!result) {
         if (reason) {
@@ -1297,6 +1314,8 @@ async function processEnvelopeAsync(opts: {
     if (downloaded.length === 0 && !(envelope.content.text ?? "").trim()) return;
   }
 
+  // Files kept in inboundDir outlive the turn; only temp files are deleted after it.
+  const tempFiles = inboundDir ? [] : downloaded;
   const mediaPaths = downloaded.map((d) => d.localPath);
   const mediaTypes = downloaded
     .map((d) => d.contentType)
@@ -1351,13 +1370,21 @@ async function processEnvelopeAsync(opts: {
       parsed: goalCommand,
     });
     if (handled) {
-      cleanupTempFiles(downloaded, account.accountId);
+      cleanupTempFiles(tempFiles, account.accountId);
       return;
     }
   }
 
+  // Name each kept file and its path: core's own attachment reader may not open every type (HTML,
+  // Office), and the path is what the agent's file tools and commands can use.
+  const keptNote = inboundDir && downloaded.length > 0
+    ? "\n\n" + downloaded
+        .map((d) => `[Attached file: ${d.name ?? "file"} (${d.contentType ?? "unknown type"}, ${d.size} bytes), saved at ${d.localPath}]`)
+        .join("\n")
+    : "";
+
   const ctxPayload: Record<string, unknown> = {
-    Body: inboundText,
+    Body: inboundText + keptNote,
     RawBody: inboundText,
     CommandBody: envelope.content.text ?? inboundText,
     BodyMarkdown: envelope.content.markdown ?? undefined,
@@ -1401,7 +1428,7 @@ async function processEnvelopeAsync(opts: {
     console.warn(
       `[webex:${account.accountId}] dispatchReply not available in plugin runtime`
     );
-    cleanupTempFiles(downloaded, account.accountId);
+    cleanupTempFiles(tempFiles, account.accountId);
     return;
   }
 
@@ -1624,7 +1651,7 @@ async function processEnvelopeAsync(opts: {
   } finally {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (replyDelivered) await progress?.close().catch(() => {});
-    cleanupTempFiles(downloaded, account.accountId);
+    cleanupTempFiles(tempFiles, account.accountId);
   }
 }
 
@@ -2917,6 +2944,7 @@ export function resolveWebexAccount(opts: {
           approvalSecretPath
         ),
         bridgeUrl: namedAccount.bridgeUrl ?? section.bridgeUrl,
+        inboundDir: namedAccount.inboundDir ?? section.inboundDir,
         bridgeToken: resolveOptionalSecret(
           namedAccount.bridgeToken ?? section.bridgeToken,
           bridgeTokenPath
@@ -2965,6 +2993,7 @@ export function resolveWebexAccount(opts: {
         ),
         bridgeUrl: section.bridgeUrl,
         bridgeToken: resolveOptionalSecret(section.bridgeToken, "channels.webex.bridgeToken"),
+        inboundDir: section.inboundDir,
         outboundFileRoots: section.outboundFileRoots,
         longReplyAttachThreshold: section.longReplyAttachThreshold,
       },

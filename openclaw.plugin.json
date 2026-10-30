@@ -569,6 +569,10 @@
               "type": "string",
               "description": "Webex event bridge base URL (for example http://webex-bridge:8790). When set, inbound events come from the bridge instead of a Mercury websocket in the gateway process."
             },
+            "inboundDir": {
+              "type": "string",
+              "description": "Folder for inbound attachments (for example the agent workspace's inbound/webex). Files are kept there 7 days under their own name and their paths are named in the message. Unset: temp files deleted after the turn."
+            },
             "bridgeToken": {
               "anyOf": [
                 {
@@ -680,6 +684,10 @@
       "bridgeUrl": {
         "type": "string",
         "description": "Webex event bridge base URL (for example http://webex-bridge:8790). When set, inbound events come from the bridge instead of a Mercury websocket in the gateway process."
+      },
+      "inboundDir": {
+        "type": "string",
+        "description": "Folder for inbound attachments (for example the agent workspace's inbound/webex). Files are kept there 7 days under their own name and their paths are named in the message. Unset: temp files deleted after the turn."
       },
       "bridgeToken": {
         "anyOf": [
@@ -1372,6 +1380,10 @@
                   "type": "string",
                   "description": "Webex event bridge base URL (for example http://webex-bridge:8790). When set, inbound events come from the bridge instead of a Mercury websocket in the gateway process."
                 },
+                "inboundDir": {
+                  "type": "string",
+                  "description": "Folder for inbound attachments (for example the agent workspace's inbound/webex). Files are kept there 7 days under their own name and their paths are named in the message. Unset: temp files deleted after the turn."
+                },
                 "bridgeToken": {
                   "anyOf": [
                     {
@@ -1483,6 +1495,10 @@
           "bridgeUrl": {
             "type": "string",
             "description": "Webex event bridge base URL (for example http://webex-bridge:8790). When set, inbound events come from the bridge instead of a Mercury websocket in the gateway process."
+          },
+          "inboundDir": {
+            "type": "string",
+            "description": "Folder for inbound attachments (for example the agent workspace's inbound/webex). Files are kept there 7 days under their own name and their paths are named in the message. Unset: temp files deleted after the turn."
           },
           "bridgeToken": {
             "anyOf": [
@@ -1639,6 +1655,10 @@
           "label": "Event Bridge URL",
           "placeholder": "http://webex-bridge:8790"
         },
+        "inboundDir": {
+          "label": "Inbound Files Folder",
+          "placeholder": "/home/node/.openclaw/workspace/inbound/webex"
+        },
         "bridgeToken": {
           "label": "Event Bridge Token",
           "sensitive": true
@@ -1715,6 +1735,10 @@
     "bridgeUrl": {
       "label": "Event Bridge URL",
       "placeholder": "http://webex-bridge:8790"
+    },
+    "inboundDir": {
+      "label": "Inbound Files Folder",
+      "placeholder": "/home/node/.openclaw/workspace/inbound/webex"
     },
     "bridgeToken": {
       "label": "Event Bridge Token",

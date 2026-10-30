@@ -77,6 +77,8 @@ interface WebexChannelSection {
     bridgeUrl?: string;
     /** Subscriber token for the bridge. Plaintext or an OpenClaw SecretRef object. */
     bridgeToken?: WebexSecretInput;
+    /** Folder for inbound attachments. See WebexChannelConfig.inboundDir. */
+    inboundDir?: string;
     /**
      * Allowed root directories for outbound local file sends. See
      * WebexChannelConfig.outboundFileRoots.
@@ -128,6 +130,8 @@ interface WebexAccountConfig {
     bridgeUrl?: string;
     /** Bridge subscriber token for this named account. Plaintext or an OpenClaw SecretRef object. */
     bridgeToken?: WebexSecretInput;
+    /** Inbound attachment folder for this named account. Falls back to the top-level section's setting. */
+    inboundDir?: string;
     /**
      * Allowed root directories for outbound local file sends for this
      * named account. Falls back to the top-level section's setting.

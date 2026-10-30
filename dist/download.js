@@ -45,6 +45,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DEFAULT_ALLOWED_CONTENT_TYPES = exports.MAX_ATTACHMENT_BYTES = void 0;
 exports.downloadWebexAttachment = downloadWebexAttachment;
+exports.safeFileName = safeFileName;
+exports.pruneInboundDir = pruneInboundDir;
 const crypto = __importStar(require("node:crypto"));
 const fs = __importStar(require("node:fs/promises"));
 const os = __importStar(require("node:os"));
@@ -164,7 +166,9 @@ async function downloadWebexAttachment(url, token, options = {}) {
         options.onWarn?.(`rejected attachment: larger than ${Math.round(maxBytes / 1024 / 1024)} MB`);
         return null;
     }
-    const fileName = `webex-${crypto.randomUUID()}${extensionFor(name, contentType)}`;
+    const fileName = options.keepName && name
+        ? `${new Date().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '').replace('T', '-')}-${safeFileName(name)}`
+        : `webex-${crypto.randomUUID()}${extensionFor(name, contentType)}`;
     const localPath = path.join(tmpDir, fileName);
     await fs.writeFile(localPath, buffer);
     return { localPath, contentType, name, size: buffer.length };
@@ -184,6 +188,34 @@ function parseFilenameFromDisposition(disposition) {
     }
     const match = disposition.match(/filename="?([^";]+)"?/i);
     return match ? match[1].trim() : undefined;
+}
+/** A file name that is safe on disk: no folders, no leading dot, at most 120 characters. */
+function safeFileName(name) {
+    const base = name.split(/[\\/]/).pop() ?? '';
+    const cleaned = base.replace(/[^A-Za-z0-9._ -]/g, '_').replace(/^[.\s]+/, '').trim();
+    return (cleaned || 'file').slice(-120);
+}
+/** Delete files older than maxAgeMs in an inbound folder (best effort). */
+async function pruneInboundDir(dir, maxAgeMs) {
+    let entries = [];
+    try {
+        entries = await fs.readdir(dir);
+    }
+    catch {
+        return;
+    }
+    const cutoff = Date.now() - maxAgeMs;
+    for (const entry of entries) {
+        const p = path.join(dir, entry);
+        try {
+            const st = await fs.stat(p);
+            if (st.isFile() && st.mtimeMs < cutoff)
+                await fs.unlink(p);
+        }
+        catch {
+            // gone or unreadable: nothing to prune
+        }
+    }
 }
 function stripCharset(contentType) {
     if (!contentType)
